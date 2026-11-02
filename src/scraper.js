@@ -3,25 +3,7 @@
  * 针对 free.datiya.com 等每日更新网站提供智能文章抓取与多日容错回退机制
  */
 
-const DEFAULT_BASE_URL = "https://free.datiya.com";
-
-/**
- * 获取当前北京时间 (UTC+8) 的 Date 对象
- */
-function getBeijingDate() {
-  const now = new Date();
-  return new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60000);
-}
-
-/**
- * 格式化日期为 YYYYMMDD
- */
-function formatDate(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}`;
-}
+import { getBeijingDate, formatDate, DEFAULT_BASE_URL } from "./utils.js";
 
 /**
  * 智能定位最新的 Clash YAML 订阅链接

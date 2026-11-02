@@ -4,10 +4,10 @@
  * 或作为 Pages _worker.js 自动运行
  *
  * 核心功能：
- * 1. 每日自动抓取免费节点站点（free.datiya.com 等）最新的 Clash 配置
- * 2. 智能容错回退机制（今日未更新自动探测前 1~3 天可用数据）
- * 3. 实时将 Clash YAML 节点转为标准节点 URI（与 格式.txt 结构一致）
- * 4. 支持账号密码访问保护（AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN 环境变量）
+ * 1. 每日00点后自动递增更新地址，一旦获取成功自动停止探测并锁定
+ * 2. 支持手动编辑地址与自动日期模式切换
+ * 3. 支持 Clash 与 V2Ray 两种源格式互相转换
+ * 4. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
  * 5. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
  */
 
@@ -16,6 +16,8 @@
  * 通用工具与 Base64 编解码助手
  * 兼容 Node.js 与 Cloudflare Worker 运行环境
  */
+
+const DEFAULT_BASE_URL = "https://free.datiya.com";
 
 function toBase64(str) {
   if (typeof btoa === "function") {
@@ -37,6 +39,24 @@ function fromBase64(str) {
     }
   }
   return Buffer.from(str, "base64").toString("utf-8");
+}
+
+/**
+ * 获取当前北京时间 (UTC+8) 的 Date 对象
+ */
+function getBeijingDate() {
+  const now = new Date();
+  return new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60000);
+}
+
+/**
+ * 将 Date 对象格式化为 YYYYMMDD 字符串
+ */
+function formatDate(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}`;
 }
 
 // ==================== 2. 协议格式化模块 ====================
@@ -348,25 +368,7 @@ function parseSubscription(rawContent) {
  * 针对 free.datiya.com 等每日更新网站提供智能文章抓取与多日容错回退机制
  */
 
-const DEFAULT_BASE_URL = "https://free.datiya.com";
 
-/**
- * 获取当前北京时间 (UTC+8) 的 Date 对象
- */
-function getBeijingDate() {
-  const now = new Date();
-  return new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60000);
-}
-
-/**
- * 格式化日期为 YYYYMMDD
- */
-function formatDate(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}`;
-}
 
 /**
  * 智能定位最新的 Clash YAML 订阅链接
@@ -463,7 +465,201 @@ async function fetchSubscriptionData(customSourceUrl) {
   };
 }
 
-// ==================== 5. 账号密码鉴权模块 ====================
+// ==================== 5. 订阅源与状态管理模块 ====================
+/**
+ * 订阅源与每日更新状态管理模块
+ * 支持自动日期递增模式、V2Ray/Clash源切换、手动编辑地址及成功获取后停止探测机制
+ */
+
+
+
+// 内存中记录的最新状态缓存
+let memoryState = {
+  date: "",           // 当前缓存数据的日期 (YYYYMMDD)
+  type: "clash",      // 请求的源类型: clash | v2ray
+  isTodayReady: false,// 今天的数据是否已成功拿到（一旦拿到即锁定，停止定时探测）
+  targetUrl: "",      // 实际使用的源地址
+  content: "",        // 源订阅文本内容
+  lastCheckTime: 0    // 最近探测检查时间戳
+};
+
+/**
+ * 根据日期和类型构造源地址
+ */
+function buildSourceUrl(dateStr, type = "clash", baseUrl = DEFAULT_BASE_URL) {
+  const ext = type.toLowerCase() === "v2ray" ? "v2ray.txt" : "clash.yaml";
+  return `${baseUrl}/uploads/${dateStr}-${ext}`;
+}
+
+/**
+ * 从 KV 或环境变量中加载手动保存的持久化配置
+ */
+async function getSavedConfig(env = {}) {
+  const kv = env.PARSEFREE_KV || env.KV;
+  if (kv && typeof kv.get === "function") {
+    try {
+      const saved = await kv.get("PARSEFREE_CONFIG", { type: "json" });
+      if (saved) return saved;
+    } catch (e) {}
+  }
+  return {
+    mode: env.SOURCE_MODE || "auto",
+    type: env.SOURCE_TYPE || "clash",
+    manualUrl: env.CUSTOM_SOURCE_URL || ""
+  };
+}
+
+/**
+ * 尝试抓取指定 URL 并验证内容有效性
+ */
+async function fetchValidContent(url) {
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "ClashforWindows/0.20.39", "Accept": "*/*" }
+    });
+    if (res.ok) {
+      const text = await res.text();
+      if (text && text.trim().length > 50) {
+        return text;
+      }
+    }
+  } catch (err) {}
+  return null;
+}
+
+/**
+ * 智能获取订阅数据（核心状态机）
+ * 每天00点之后自动更新目标日期，一旦成功拿到今天的数据即停止探测并锁定
+ */
+async function resolveSubscriptionData({
+  requestedSource = "",
+  requestedType = "",
+  forceRefresh = false,
+  env = {}
+}) {
+  const savedConfig = await getSavedConfig(env);
+  const type = (requestedType || savedConfig.type || "clash").toLowerCase();
+  const manualUrl = requestedSource || (savedConfig.mode === "manual" ? savedConfig.manualUrl : "");
+
+  // 1. 手动模式：直接使用指定地址
+  if (manualUrl) {
+    const res = await fetch(manualUrl, {
+      headers: { "User-Agent": "ClashforWindows/0.20.39", "Accept": "*/*" }
+    });
+    if (!res.ok) throw new Error(`手动源获取失败 [HTTP ${res.status}]: ${manualUrl}`);
+    const content = await res.text();
+    const dateMatch = manualUrl.match(/(\d{8})/);
+    return {
+      content,
+      targetUrl: manualUrl,
+      sourceDate: dateMatch ? dateMatch[1] : "manual",
+      isToday: true,
+      mode: "manual",
+      type
+    };
+  }
+
+  // 2. 自动模式：基于当前北京时间 (UTC+8) 的日期自动递增
+  const bjNow = getBeijingDate();
+  const todayStr = formatDate(bjNow);
+
+  // 检查内存中是否已拿到今天的数据且类型一致
+  if (!forceRefresh && memoryState.isTodayReady && memoryState.date === todayStr && memoryState.type === type && memoryState.content) {
+    return {
+      content: memoryState.content,
+      targetUrl: memoryState.targetUrl,
+      sourceDate: memoryState.date,
+      isToday: true,
+      mode: "auto",
+      type
+    };
+  }
+
+  // 候选类型列表：若指定 v2ray，当 v2ray 为空时自动降级回退到 clash 兜底
+  const candidateTypes = type === "v2ray" ? ["v2ray", "clash"] : ["clash"];
+
+  // 3. 优先探测当天的最新地址
+  for (const cType of candidateTypes) {
+    const todayUrl = buildSourceUrl(todayStr, cType);
+    const content = await fetchValidContent(todayUrl);
+    if (content) {
+      memoryState = {
+        date: todayStr,
+        type,
+        isTodayReady: true, // 锁定今日就绪，后续停止探测
+        targetUrl: todayUrl,
+        content,
+        lastCheckTime: Date.now()
+      };
+      return {
+        content,
+        targetUrl: todayUrl,
+        sourceDate: todayStr,
+        isToday: true,
+        mode: "auto",
+        type
+      };
+    }
+  }
+
+  // 4. 当天新文件尚未上传（如凌晨404）-> 容错回退机制，依次尝试昨日、前日
+  for (let offset = 1; offset <= 3; offset++) {
+    const pastDate = new Date(bjNow.getTime() - offset * 86400000);
+    const pastDateStr = formatDate(pastDate);
+
+    for (const cType of candidateTypes) {
+      const pastUrl = buildSourceUrl(pastDateStr, cType);
+      const content = await fetchValidContent(pastUrl);
+      if (content) {
+        memoryState = {
+          date: pastDateStr,
+          type,
+          isTodayReady: false, // 标记今天数据尚未 ready，下次请求或 cron 将继续探测
+          targetUrl: pastUrl,
+          content,
+          lastCheckTime: Date.now()
+        };
+        return {
+          content,
+          targetUrl: pastUrl,
+          sourceDate: pastDateStr,
+          isToday: false, // 说明当前是回退数据
+          mode: "auto",
+          type
+        };
+      }
+    }
+  }
+
+  throw new Error(`无法获取可用节点数据，已尝试探测今日 [${todayStr}] 及前 3 日源均无响应。`);
+}
+
+/**
+ * 定时任务 (Cron Trigger) 触发执行函数
+ * 仅当今天数据尚未拿到时才触发网络探测，一旦拿到立刻停止探测
+ */
+async function handleScheduledTask(env = {}) {
+  const bjNow = getBeijingDate();
+  const todayStr = formatDate(bjNow);
+
+  // 若今日数据已就绪，直接跳过本次定时获取
+  if (memoryState.isTodayReady && memoryState.date === todayStr) {
+    console.log(`[Cron] 今日数据已锁定 [${todayStr}]，无需重复探测。`);
+    return;
+  }
+
+  console.log(`[Cron] 开始探测今日订阅数据 [${todayStr}]...`);
+  try {
+    await resolveSubscriptionData({ forceRefresh: true, env });
+    if (memoryState.isTodayReady) {
+      console.log(`[Cron] 成功获取今日最新数据 [${todayStr}]，已锁定停止探测！`);
+    }
+  } catch (err) {
+    console.warn(`[Cron] 今日数据暂未上传，保持回退状态:`, err.message);
+  }
+}
+
+// ==================== 6. 账号密码鉴权模块 ====================
 /**
  * 账号密码与访问鉴权模块
  * 支持环境变量配置：AUTH_USERNAME、AUTH_PASSWORD、AUTH_TOKEN
@@ -549,10 +745,11 @@ function buildAuthRequiredResponse() {
   );
 }
 
-// ==================== 6. UI 渲染模块 ====================
+// ==================== 7. UI 渲染模块 ====================
 /**
  * Web 控制台页面渲染模块
  * 遵循 Element Plus 企业级风格，简洁、专业、克制
+ * 支持自动日期模式 / 手动编辑地址模式切换，支持 V2Ray / Clash 源切换
  */
 
 function renderDashboardHtml({
@@ -561,19 +758,23 @@ function renderDashboardHtml({
   nodes,
   targetUrl,
   sourceDate,
-  method,
+  isToday,
+  mode,
+  type,
   authInfo = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
   const isProtected = Boolean(authInfo.active);
+  const isAutoMode = mode !== "manual";
+  const isV2ray = type === "v2ray";
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>免费节点订阅解析转换服务</title>
+  <title>免费节点自动同步与转换服务 - ParseFree</title>
   <style>
     :root {
       --el-color-primary: #409eff;
@@ -582,175 +783,151 @@ function renderDashboardHtml({
       --el-color-info: #909399;
       --el-color-danger: #f56c6c;
       --el-bg-color: #f5f7fa;
-      --el-text-color-primary: #303133;
-      --el-text-color-regular: #606266;
-      --el-text-color-secondary: #909399;
+      --el-text-primary: #303133;
+      --el-text-regular: #606266;
+      --el-text-secondary: #909399;
       --el-border-color: #dcdfe6;
-      --el-border-color-light: #e4e7ed;
+      --el-border-light: #e4e7ed;
       --card-bg: #ffffff;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
       background-color: var(--el-bg-color);
-      color: var(--el-text-color-primary);
+      color: var(--el-text-primary);
       line-height: 1.6;
-      padding: 24px;
+      padding: 24px 16px;
     }
     .container { max-width: 960px; margin: 0 auto; }
-    .header {
-      background: var(--card-bg);
-      border: 1px solid var(--el-border-color-light);
-      border-radius: 6px;
-      padding: 20px 24px;
-      margin-bottom: 20px;
-    }
-    .header h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; color: var(--el-text-color-primary); }
-    .header p { font-size: 14px; color: var(--el-text-color-regular); }
-    
     .card {
       background: var(--card-bg);
-      border: 1px solid var(--el-border-color-light);
+      border: 1px solid var(--el-border-light);
       border-radius: 6px;
       padding: 20px 24px;
       margin-bottom: 20px;
     }
     .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-left: 4px solid var(--el-color-primary); padding-left: 10px; }
-    
-    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
-    .meta-item { background: #fafafa; border: 1px solid var(--el-border-color-light); padding: 12px; border-radius: 4px; }
-    .meta-label { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 4px; }
-    .meta-value { font-size: 15px; font-weight: 600; color: var(--el-text-color-primary); word-break: break-all; }
-    
-    .sub-box { margin-bottom: 16px; }
-    .sub-label { font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--el-text-color-regular); }
-    .input-group { display: flex; gap: 8px; }
+    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 16px; }
+    .meta-item { background: #fafafa; border: 1px solid var(--el-border-light); padding: 12px; border-radius: 4px; }
+    .meta-label { font-size: 12px; color: var(--el-text-secondary); margin-bottom: 4px; }
+    .meta-value { font-size: 14px; font-weight: 600; word-break: break-all; }
+    .input-group { display: flex; gap: 8px; margin-bottom: 12px; }
     .input-control {
-      flex: 1;
-      padding: 9px 12px;
-      border: 1px solid var(--el-border-color);
-      border-radius: 4px;
-      font-size: 13px;
-      background: #fafafa;
-      color: var(--el-text-color-primary);
+      flex: 1; padding: 8px 12px; border: 1px solid var(--el-border-color);
+      border-radius: 4px; font-size: 13px; background: #fafafa; color: var(--el-text-primary);
     }
     .btn {
-      padding: 9px 16px;
-      border-radius: 4px;
-      font-size: 13px;
-      cursor: pointer;
-      font-weight: 500;
-      border: 1px solid transparent;
-      white-space: nowrap;
-      transition: all 0.2s;
+      padding: 8px 16px; border-radius: 4px; font-size: 13px; cursor: pointer;
+      font-weight: 500; border: 1px solid transparent; transition: all 0.2s;
     }
     .btn-primary { background: var(--el-color-primary); color: #fff; }
     .btn-primary:hover { background: #66b1ff; }
-    .btn-default { background: #fff; border-color: var(--el-border-color); color: var(--el-text-color-regular); }
+    .btn-default { background: #fff; border-color: var(--el-border-color); color: var(--el-text-regular); }
     .btn-default:hover { border-color: var(--el-color-primary); color: var(--el-color-primary); }
-    
-    .node-list { max-height: 400px; overflow-y: auto; border: 1px solid var(--el-border-color-light); border-radius: 4px; }
+    .node-list { max-height: 360px; overflow-y: auto; border: 1px solid var(--el-border-light); border-radius: 4px; }
     .node-item {
-      padding: 10px 14px;
-      font-size: 13px;
-      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      border-bottom: 1px solid var(--el-border-color-light);
-      word-break: break-all;
-      background: #fff;
+      padding: 9px 12px; font-size: 12px; font-family: monospace;
+      border-bottom: 1px solid var(--el-border-light); word-break: break-all; background: #fff;
     }
     .node-item:nth-child(even) { background: #fafafa; }
-    .node-item:last-child { border-bottom: none; }
-    .tag {
-      display: inline-block;
-      padding: 2px 6px;
-      font-size: 11px;
-      border-radius: 3px;
-      font-weight: 600;
-      margin-right: 8px;
-    }
+    .tag { display: inline-block; padding: 2px 6px; font-size: 11px; border-radius: 3px; font-weight: 600; margin-right: 8px; }
     .tag-vmess { background: #ecf5ff; color: #409eff; border: 1px solid #d9ecff; }
     .tag-ss { background: #f0f9eb; color: #67c23a; border: 1px solid #e1f3d8; }
     .tag-anytls { background: #fdf6ec; color: #e6a23c; border: 1px solid #faecd8; }
     .tag-other { background: #f4f4f5; color: #909399; border: 1px solid #e9e9eb; }
-    
-    .toast {
-      position: fixed;
-      top: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0, 0, 0, 0.75);
-      color: #fff;
-      padding: 8px 16px;
-      border-radius: 4px;
-      font-size: 14px;
-      display: none;
-      z-index: 9999;
-    }
+    .radio-label { margin-right: 18px; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+    .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: #fff; padding: 8px 18px; border-radius: 4px; font-size: 13px; display: none; z-index: 9999; }
   </style>
 </head>
 <body>
   <div class="toast" id="toast">复制成功</div>
   <div class="container">
-    <div class="header">
-      <h1>免费节点自动同步与格式转换服务</h1>
-      <p>自动抓取每日更新的节点订阅，实时转换为标准节点链接格式（与 格式.txt 结构一致）。</p>
+    <div class="card" style="margin-bottom: 16px;">
+      <h1 style="font-size: 18px; font-weight: 600; margin-bottom: 6px;">ParseFree 免费节点自动同步与转换服务</h1>
+      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。支持手动编辑与格式转换。</p>
     </div>
 
+    <!-- 1. 运行状态卡片 -->
     <div class="card">
-      <div class="card-title">节点状态概览</div>
+      <div class="card-title">当前同步状态</div>
       <div class="meta-grid">
         <div class="meta-item">
-          <div class="meta-label">已解析可用节点数</div>
+          <div class="meta-label">已解析可用节点</div>
           <div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div>
         </div>
         <div class="meta-item">
-          <div class="meta-label">数据源发布日期</div>
-          <div class="meta-value">${sourceDate || "最新"}</div>
+          <div class="meta-label">数据来源与日期</div>
+          <div class="meta-value">${sourceDate} (${isAutoMode ? (isToday ? "今日已锁定" : "自动回退中") : "手动"})</div>
         </div>
         <div class="meta-item">
-          <div class="meta-label">获取机制</div>
-          <div class="meta-value">${method === "article_discovery" ? "文章智能抓取" : (method === "date_probe" ? "日期轮询探测" : "自定义源")}</div>
+          <div class="meta-label">源文件格式</div>
+          <div class="meta-value">${isV2ray ? "V2Ray 格式 (.txt)" : "Clash 格式 (.yaml)"}</div>
         </div>
         <div class="meta-item">
-          <div class="meta-label">访问鉴权保护</div>
-          <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启 (密码保护)" : "未开启 (公开访问)"}</div>
+          <div class="meta-label">安全鉴权状态</div>
+          <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启密码保护" : "公开访问"}</div>
         </div>
       </div>
-      <div class="meta-label">当前解析上游源地址：</div>
-      <div style="font-size: 13px; color: var(--el-text-color-regular); font-family: monospace; word-break: break-all;">${targetUrl}</div>
+      <div class="meta-label">当前生效的上游源地址：</div>
+      <div style="font-size: 13px; color: var(--el-text-regular); font-family: monospace; word-break: break-all; margin-top: 4px;">${targetUrl}</div>
     </div>
 
+    <!-- 2. 数据源配置与手动编辑卡片 -->
     <div class="card">
-      <div class="card-title">订阅地址获取</div>
-      <div class="sub-box">
-        <div class="sub-label">1. 通用明文订阅链接（每行一个节点，推荐导入 Shadowrocket / v2rayN / sing-box / NekoBox）：</div>
+      <div class="card-title">数据源模式设置与手动编辑</div>
+      <div style="margin-bottom: 14px;">
+        <span style="font-size: 13px; font-weight: 600; margin-right: 12px;">运行模式：</span>
+        <label class="radio-label"><input type="radio" name="workMode" value="auto" ${isAutoMode ? "checked" : ""} onchange="switchMode('auto')"> 自动日期递增模式 (每日00点后自动更新)</label>
+        <label class="radio-label"><input type="radio" name="workMode" value="manual" ${!isAutoMode ? "checked" : ""} onchange="switchMode('manual')"> 手动编辑指定地址模式</label>
+      </div>
+      <div style="margin-bottom: 14px;">
+        <span style="font-size: 13px; font-weight: 600; margin-right: 12px;">源文件类型：</span>
+        <label class="radio-label"><input type="radio" name="srcType" value="clash" ${!isV2ray ? "checked" : ""} onchange="switchType('clash')"> Clash (.yaml)</label>
+        <label class="radio-label"><input type="radio" name="srcType" value="v2ray" ${isV2ray ? "checked" : ""} onchange="switchType('v2ray')"> V2Ray (.txt)</label>
+      </div>
+      <div id="manualBox" style="${isAutoMode ? 'display: none;' : ''}">
+        <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">输入自定义或指定日期的节点订阅地址：</div>
+        <div class="input-group">
+          <input type="text" class="input-control" id="customInput" value="${targetUrl}" placeholder="例如: https://free.datiya.com/uploads/20261102-clash.yaml">
+          <button class="btn btn-primary" onclick="applyManualUrl()">应用此地址</button>
+        </div>
+      </div>
+      <div id="autoTip" style="font-size: 12px; color: var(--el-text-secondary); ${!isAutoMode ? 'display: none;' : ''}">
+        💡 自动模式下，系统会在每日 00:00 自动探测当天日期地址（例如 https://free.datiya.com/uploads/20261103-clash.yaml）。一旦探测到有效数据即锁定并停止探测；若当天未发布则自动平滑回溯前一天。
+      </div>
+    </div>
+
+    <!-- 3. 订阅地址获取卡片 -->
+    <div class="card">
+      <div class="card-title">客户端订阅链接</div>
+      <div style="margin-bottom: 12px;">
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. 通用明文订阅链接 (与 格式.txt 一致，支持小火箭 / v2rayN / sing-box)：</div>
         <div class="input-group">
           <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
           <button class="btn btn-primary" onclick="copyText('${subUrl}')">复制订阅链接</button>
         </div>
       </div>
-      <div class="sub-box">
-        <div class="sub-label">2. Base64 编码订阅链接（适用于仅支持 base64 订阅的客户端）：</div>
+      <div style="margin-bottom: 14px;">
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">2. Base64 编码订阅链接 (兼容仅认 base64 的旧版客户端)：</div>
         <div class="input-group">
           <input type="text" class="input-control" readonly id="b64SubInput" value="${b64SubUrl}">
           <button class="btn btn-default" onclick="copyText('${b64SubUrl}')">复制 Base64 链接</button>
         </div>
       </div>
-      <div style="margin-top: 16px;">
-        <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部节点链接</button>
-      </div>
+      <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
     </div>
 
+    <!-- 4. 节点列表卡片 -->
     <div class="card">
-      <div class="card-title">节点链接明细 (${nodeCount})</div>
+      <div class="card-title">节点明细预览 (${nodeCount})</div>
       <div class="node-list">
-        ${nodes.map((n) => {
-          const proto = n.split("://")[0] || "node";
-          let tagClass = "tag-other";
-          if (proto === "vmess") tagClass = "tag-vmess";
-          else if (proto === "ss") tagClass = "tag-ss";
-          else if (proto === "anytls") tagClass = "tag-anytls";
-          return `<div class="node-item"><span class="tag ${tagClass}">${proto.toUpperCase()}</span>${n}</div>`;
+        ${nodes.map(n => {
+          const proto = (n.split("://")[0] || "node").toLowerCase();
+          let cls = "tag-other";
+          if (proto === "vmess") cls = "tag-vmess";
+          else if (proto === "ss") cls = "tag-ss";
+          else if (proto === "anytls") cls = "tag-anytls";
+          return `<div class="node-item"><span class="tag ${cls}">${proto.toUpperCase()}</span>${n}</div>`;
         }).join("")}
       </div>
     </div>
@@ -758,35 +935,47 @@ function renderDashboardHtml({
 
   <script>
     const allNodes = ${escapedNodes};
-
     function showToast(msg) {
       const t = document.getElementById("toast");
-      t.innerText = msg;
-      t.style.display = "block";
+      t.innerText = msg; t.style.display = "block";
       setTimeout(() => { t.style.display = "none"; }, 2000);
     }
-
     function copyText(val) {
-      navigator.clipboard.writeText(val).then(() => {
-        showToast("已复制到剪贴板");
-      }).catch(() => {
-        prompt("请手动复制：", val);
-      });
+      navigator.clipboard.writeText(val).then(() => showToast("已复制到剪贴板")).catch(() => prompt("请复制：", val));
     }
+    function copyAllNodes() { copyText(allNodes.join("\\n")); }
 
-    function copyAllNodes() {
-      const text = allNodes.join("\\n");
-      copyText(text);
+    function switchMode(m) {
+      document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
+      document.getElementById("autoTip").style.display = m === "auto" ? "block" : "none";
+      if (m === "auto") {
+        const u = new URL(window.location.href);
+        u.searchParams.delete("source");
+        u.searchParams.delete("mode");
+        window.location.href = u.toString();
+      }
+    }
+    function switchType(t) {
+      const u = new URL(window.location.href);
+      u.searchParams.set("type", t);
+      window.location.href = u.toString();
+    }
+    function applyManualUrl() {
+      const val = document.getElementById("customInput").value.trim();
+      if (!val) return alert("请输入有效的节点地址");
+      const u = new URL(window.location.href);
+      u.searchParams.set("source", val);
+      window.location.href = u.toString();
     }
   </script>
 </body>
 </html>`;
 }
 
-// ==================== 7. Worker 主入口 ====================
+// ==================== 8. Worker 主入口 ====================
 /**
  * Cloudflare Worker 主入口
- * 路由分发、Cache API 缓存控制与结果输出
+ * 支持 HTTP 请求路由处理与 Cron 定时事件监听 (scheduled)
  */
 
 
@@ -795,7 +984,6 @@ function renderDashboardHtml({
 
 
 
-// 常见代理客户端 User-Agent 标识
 const CLIENT_UA_PATTERNS = [
   "clash", "v2ray", "shadowrocket", "quantumult",
   "surge", "sing-box", "nekobox", "surfboard", "curl", "wget"
@@ -807,6 +995,7 @@ function isProxyClient(userAgent = "") {
 }
 
 export default {
+  // HTTP 请求处理
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname, searchParams } = url;
@@ -818,28 +1007,32 @@ export default {
     }
 
     // 2. 提取请求参数
-    const customSource = searchParams.get("source") || searchParams.get("url");
+    const requestedSource = searchParams.get("source") || searchParams.get("url") || "";
+    const requestedType = searchParams.get("type") || ""; // clash | v2ray
     const format = (searchParams.get("format") || "").toLowerCase();
     const isB64 = searchParams.get("b64") === "1" || searchParams.get("b64") === "true" || format === "base64" || format === "b64";
     const filterKeyword = searchParams.get("filter") || "";
     const forceRefresh = searchParams.get("refresh") === "1" || searchParams.get("force") === "1";
 
-    // 2. 缓存检查 (Cloudflare Cache API)
+    // 3. 边缘缓存处理 (Cloudflare Cache API)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKey = new Request(url.toString(), request);
     if (cache && !forceRefresh && request.method === "GET") {
-      const cachedResponse = await cache.match(cacheKey);
-      if (cachedResponse) {
-        return cachedResponse;
-      }
+      const cached = await cache.match(cacheKey);
+      if (cached) return cached;
     }
 
     try {
-      // 3. 获取目标数据并解析
-      const { content, targetUrl, meta } = await fetchSubscriptionData(customSource);
-      let nodes = parseSubscription(content);
+      // 4. 解析与获取订阅数据（智能日期状态机或手动模式）
+      const data = await resolveSubscriptionData({
+        requestedSource,
+        requestedType,
+        forceRefresh,
+        env
+      });
+      let nodes = parseSubscription(data.content);
 
-      // 4. 按关键字过滤
+      // 5. 关键词过滤
       if (filterKeyword) {
         const kw = filterKeyword.toLowerCase();
         nodes = nodes.filter(n => decodeURIComponent(n).toLowerCase().includes(kw));
@@ -849,7 +1042,7 @@ export default {
       const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
       const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
 
-      // 5. 客户端或纯订阅请求 -> 返回纯文本节点列表或 Base64
+      // 6. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
       if (isClientRequest) {
         let bodyText = nodes.join("\n");
         if (isB64) {
@@ -861,7 +1054,8 @@ export default {
           "Cache-Control": "public, max-age=1800",
           "Access-Control-Allow-Origin": "*",
           "X-Total-Nodes": String(nodes.length),
-          "X-Source-Date": String(meta.sourceDate || "unknown")
+          "X-Source-Date": encodeURIComponent(String(data.sourceDate || "unknown")),
+          "X-Source-Type": encodeURIComponent(String(data.type))
         };
 
         const response = new Response(bodyText, { status: 200, headers });
@@ -871,19 +1065,28 @@ export default {
         return response;
       }
 
-      // 6. 浏览器访问根路径 -> 渲染可视化 Web 控制台
+      // 7. 浏览器访问根路径 -> 渲染 Web 控制面板
       const baseUrl = `${url.protocol}//${url.host}`;
-      const tokenParam = auth.token ? `token=${encodeURIComponent(auth.token)}` : "";
-      const subUrl = tokenParam ? `${baseUrl}/sub?${tokenParam}` : `${baseUrl}/sub`;
-      const b64SubUrl = tokenParam ? `${baseUrl}/sub?b64=1&${tokenParam}` : `${baseUrl}/sub?b64=1`;
+      const queryParts = [];
+      if (auth.token) queryParts.push(`token=${encodeURIComponent(auth.token)}`);
+      if (data.type === "v2ray") queryParts.push("type=v2ray");
+      if (requestedSource) queryParts.push(`source=${encodeURIComponent(requestedSource)}`);
+
+      const queryStr = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
+      const b64QueryStr = queryParts.length > 0 ? `?b64=1&${queryParts.join("&")}` : "?b64=1";
+
+      const subUrl = `${baseUrl}/sub${queryStr}`;
+      const b64SubUrl = `${baseUrl}/sub${b64QueryStr}`;
 
       const html = renderDashboardHtml({
         subUrl,
         b64SubUrl,
         nodes,
-        targetUrl,
-        sourceDate: meta.sourceDate,
-        method: meta.method,
+        targetUrl: data.targetUrl,
+        sourceDate: data.sourceDate,
+        isToday: data.isToday,
+        mode: data.mode,
+        type: data.type,
         authInfo: auth
       });
 
@@ -891,7 +1094,7 @@ export default {
         status: 200,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, max-age=600"
+          "Cache-Control": "public, max-age=300"
         }
       });
 
@@ -902,12 +1105,17 @@ export default {
 
     } catch (err) {
       return new Response(
-        `Error: ${err.message}\n\n请检查上游订阅源是否可访问，或稍后重试。`,
+        `Error: ${err.message}\n\n请检查源地址是否有效，或稍后重试。`,
         {
           status: 500,
           headers: { "Content-Type": "text/plain; charset=utf-8" }
         }
       );
     }
+  },
+
+  // 定时任务 (Cron Trigger) 触发处理
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handleScheduledTask(env));
   }
 };

@@ -2,6 +2,13 @@ name = "parsefree-worker"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-# 可根据需要修改 workers 路由或配置
+# 每日定时探测触发器（每15分钟检查一次今日新源，一旦成功获取即停止探测并锁定）
+[triggers]
+crons = ["*/15 * * * *"]
+
+# 可选的环境变量配置
 # [vars]
-# DEFAULT_BASE_URL = "https://free.datiya.com"
+# AUTH_PASSWORD = "your_secret_password"
+# AUTH_USERNAME = "admin"
+# SOURCE_TYPE = "clash" # clash 或 v2ray
+# CUSTOM_SOURCE_URL = "" # 手动指定固定源地址

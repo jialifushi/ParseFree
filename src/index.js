@@ -1,15 +1,14 @@
 /**
  * Cloudflare Worker 主入口
- * 路由分发、Cache API 缓存控制与结果输出
+ * 支持 HTTP 请求路由处理与 Cron 定时事件监听 (scheduled)
  */
 
 import { parseSubscription } from "./parser.js";
 import { toBase64 } from "./utils.js";
-import { fetchSubscriptionData } from "./scraper.js";
 import { renderDashboardHtml } from "./ui.js";
 import { verifyAuth, buildAuthRequiredResponse } from "./auth.js";
+import { resolveSubscriptionData, handleScheduledTask } from "./manager.js";
 
-// 常见代理客户端 User-Agent 标识
 const CLIENT_UA_PATTERNS = [
   "clash", "v2ray", "shadowrocket", "quantumult",
   "surge", "sing-box", "nekobox", "surfboard", "curl", "wget"
@@ -21,6 +20,7 @@ function isProxyClient(userAgent = "") {
 }
 
 export default {
+  // HTTP 请求处理
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname, searchParams } = url;
@@ -32,28 +32,32 @@ export default {
     }
 
     // 2. 提取请求参数
-    const customSource = searchParams.get("source") || searchParams.get("url");
+    const requestedSource = searchParams.get("source") || searchParams.get("url") || "";
+    const requestedType = searchParams.get("type") || ""; // clash | v2ray
     const format = (searchParams.get("format") || "").toLowerCase();
     const isB64 = searchParams.get("b64") === "1" || searchParams.get("b64") === "true" || format === "base64" || format === "b64";
     const filterKeyword = searchParams.get("filter") || "";
     const forceRefresh = searchParams.get("refresh") === "1" || searchParams.get("force") === "1";
 
-    // 2. 缓存检查 (Cloudflare Cache API)
+    // 3. 边缘缓存处理 (Cloudflare Cache API)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKey = new Request(url.toString(), request);
     if (cache && !forceRefresh && request.method === "GET") {
-      const cachedResponse = await cache.match(cacheKey);
-      if (cachedResponse) {
-        return cachedResponse;
-      }
+      const cached = await cache.match(cacheKey);
+      if (cached) return cached;
     }
 
     try {
-      // 3. 获取目标数据并解析
-      const { content, targetUrl, meta } = await fetchSubscriptionData(customSource);
-      let nodes = parseSubscription(content);
+      // 4. 解析与获取订阅数据（智能日期状态机或手动模式）
+      const data = await resolveSubscriptionData({
+        requestedSource,
+        requestedType,
+        forceRefresh,
+        env
+      });
+      let nodes = parseSubscription(data.content);
 
-      // 4. 按关键字过滤
+      // 5. 关键词过滤
       if (filterKeyword) {
         const kw = filterKeyword.toLowerCase();
         nodes = nodes.filter(n => decodeURIComponent(n).toLowerCase().includes(kw));
@@ -63,7 +67,7 @@ export default {
       const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
       const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
 
-      // 5. 客户端或纯订阅请求 -> 返回纯文本节点列表或 Base64
+      // 6. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
       if (isClientRequest) {
         let bodyText = nodes.join("\n");
         if (isB64) {
@@ -75,7 +79,8 @@ export default {
           "Cache-Control": "public, max-age=1800",
           "Access-Control-Allow-Origin": "*",
           "X-Total-Nodes": String(nodes.length),
-          "X-Source-Date": String(meta.sourceDate || "unknown")
+          "X-Source-Date": encodeURIComponent(String(data.sourceDate || "unknown")),
+          "X-Source-Type": encodeURIComponent(String(data.type))
         };
 
         const response = new Response(bodyText, { status: 200, headers });
@@ -85,19 +90,28 @@ export default {
         return response;
       }
 
-      // 6. 浏览器访问根路径 -> 渲染可视化 Web 控制台
+      // 7. 浏览器访问根路径 -> 渲染 Web 控制面板
       const baseUrl = `${url.protocol}//${url.host}`;
-      const tokenParam = auth.token ? `token=${encodeURIComponent(auth.token)}` : "";
-      const subUrl = tokenParam ? `${baseUrl}/sub?${tokenParam}` : `${baseUrl}/sub`;
-      const b64SubUrl = tokenParam ? `${baseUrl}/sub?b64=1&${tokenParam}` : `${baseUrl}/sub?b64=1`;
+      const queryParts = [];
+      if (auth.token) queryParts.push(`token=${encodeURIComponent(auth.token)}`);
+      if (data.type === "v2ray") queryParts.push("type=v2ray");
+      if (requestedSource) queryParts.push(`source=${encodeURIComponent(requestedSource)}`);
+
+      const queryStr = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
+      const b64QueryStr = queryParts.length > 0 ? `?b64=1&${queryParts.join("&")}` : "?b64=1";
+
+      const subUrl = `${baseUrl}/sub${queryStr}`;
+      const b64SubUrl = `${baseUrl}/sub${b64QueryStr}`;
 
       const html = renderDashboardHtml({
         subUrl,
         b64SubUrl,
         nodes,
-        targetUrl,
-        sourceDate: meta.sourceDate,
-        method: meta.method,
+        targetUrl: data.targetUrl,
+        sourceDate: data.sourceDate,
+        isToday: data.isToday,
+        mode: data.mode,
+        type: data.type,
         authInfo: auth
       });
 
@@ -105,7 +119,7 @@ export default {
         status: 200,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, max-age=600"
+          "Cache-Control": "public, max-age=300"
         }
       });
 
@@ -116,12 +130,17 @@ export default {
 
     } catch (err) {
       return new Response(
-        `Error: ${err.message}\n\n请检查上游订阅源是否可访问，或稍后重试。`,
+        `Error: ${err.message}\n\n请检查源地址是否有效，或稍后重试。`,
         {
           status: 500,
           headers: { "Content-Type": "text/plain; charset=utf-8" }
         }
       );
     }
+  },
+
+  // 定时任务 (Cron Trigger) 触发处理
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handleScheduledTask(env));
   }
 };

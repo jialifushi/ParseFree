@@ -10,6 +10,7 @@ const utilsCode = fs.readFileSync(path.join(rootDir, "src/utils.js"), "utf8");
 const formatterCode = fs.readFileSync(path.join(rootDir, "src/formatter.js"), "utf8");
 const parserCode = fs.readFileSync(path.join(rootDir, "src/parser.js"), "utf8");
 const scraperCode = fs.readFileSync(path.join(rootDir, "src/scraper.js"), "utf8");
+const managerCode = fs.readFileSync(path.join(rootDir, "src/manager.js"), "utf8");
 const uiCode = fs.readFileSync(path.join(rootDir, "src/ui.js"), "utf8");
 const authCode = fs.readFileSync(path.join(rootDir, "src/auth.js"), "utf8");
 const indexCode = fs.readFileSync(path.join(rootDir, "src/index.js"), "utf8");
@@ -25,6 +26,7 @@ const cleanedUtils = cleanModule(utilsCode);
 const cleanedFormatter = cleanModule(formatterCode);
 const cleanedParser = cleanModule(parserCode);
 const cleanedScraper = cleanModule(scraperCode);
+const cleanedManager = cleanModule(managerCode);
 const cleanedUi = cleanModule(uiCode);
 const cleanedAuth = cleanModule(authCode);
 const cleanedIndex = indexCode.replace(/^import\s+[\s\S]*?from\s+['"][^'"]+['"];?/gm, "").trim();
@@ -35,10 +37,10 @@ const bundleContent = `/**
  * 或作为 Pages _worker.js 自动运行
  *
  * 核心功能：
- * 1. 每日自动抓取免费节点站点（free.datiya.com 等）最新的 Clash 配置
- * 2. 智能容错回退机制（今日未更新自动探测前 1~3 天可用数据）
- * 3. 实时将 Clash YAML 节点转为标准节点 URI（与 格式.txt 结构一致）
- * 4. 支持账号密码访问保护（AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN 环境变量）
+ * 1. 每日00点后自动递增更新地址，一旦获取成功自动停止探测并锁定
+ * 2. 支持手动编辑地址与自动日期模式切换
+ * 3. 支持 Clash 与 V2Ray 两种源格式互相转换
+ * 4. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
  * 5. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
  */
 
@@ -54,13 +56,16 @@ ${cleanedParser}
 // ==================== 4. 动态抓取与容错模块 ====================
 ${cleanedScraper}
 
-// ==================== 5. 账号密码鉴权模块 ====================
+// ==================== 5. 订阅源与状态管理模块 ====================
+${cleanedManager}
+
+// ==================== 6. 账号密码鉴权模块 ====================
 ${cleanedAuth}
 
-// ==================== 6. UI 渲染模块 ====================
+// ==================== 7. UI 渲染模块 ====================
 ${cleanedUi}
 
-// ==================== 7. Worker 主入口 ====================
+// ==================== 8. Worker 主入口 ====================
 ${cleanedIndex}
 `;
 
