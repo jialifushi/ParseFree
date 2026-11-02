@@ -15,6 +15,9 @@ const CLIENT_UA_PATTERNS = [
   "surge", "sing-box", "nekobox", "surfboard", "curl", "wget"
 ];
 
+// 版本标识：代码更新后自动使 Cloudflare 旧版本边缘缓存完全失效
+const WORKER_VERSION = "3.2.0";
+
 function isProxyClient(userAgent = "") {
   const ua = userAgent.toLowerCase();
   return CLIENT_UA_PATTERNS.some(p => ua.includes(p));
@@ -45,12 +48,21 @@ export default {
     const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
     const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
 
-    // 3. 边缘缓存处理 (Cloudflare Cache API)
+    // 3. 边缘缓存处理 (注入版本号以保证代码更新后旧缓存立即失效)
     const cache = typeof caches !== "undefined" ? caches.default : null;
-    const cacheKey = new Request(url.toString(), request);
+    const cacheKeyUrl = new URL(url.toString());
+    cacheKeyUrl.searchParams.set("_worker_v", WORKER_VERSION);
+    const cacheKey = new Request(cacheKeyUrl.toString(), request);
     if (cache && !forceRefresh && request.method === "GET") {
       const cached = await cache.match(cacheKey);
-      if (cached) return cached;
+      if (cached) {
+        // 确保客户端始终收到禁止本地缓存标头，避免手机客户端缓存旧备注
+        const clientRes = new Response(cached.body, cached);
+        clientRes.headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        clientRes.headers.set("Pragma", "no-cache");
+        clientRes.headers.set("Expires", "0");
+        return clientRes;
+      }
     }
 
     try {
@@ -86,8 +98,13 @@ export default {
 
         const headers = {
           "Content-Type": "text/plain; charset=utf-8",
-          "Cache-Control": "public, max-age=1800",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0",
           "Access-Control-Allow-Origin": "*",
+          "Subscription-Userinfo": "upload=0; download=0; total=10737418240000; expire=0",
+          "Profile-Update-Interval": "6",
+          "Content-Disposition": `attachment; filename="ParseFree_${data.sourceDate || 'sub'}.txt"`,
           "X-Total-Nodes": String(nodes.length),
           "X-Source-Date": encodeURIComponent(String(data.sourceDate || "unknown")),
           "X-Source-Type": encodeURIComponent(String(data.type))
@@ -95,7 +112,11 @@ export default {
 
         const response = new Response(bodyText, { status: 200, headers });
         if (cache && ctx && typeof ctx.waitUntil === "function") {
-          ctx.waitUntil(cache.put(cacheKey, response.clone()));
+          const edgeCacheRes = new Response(bodyText, {
+            status: 200,
+            headers: { ...headers, "Cache-Control": "public, max-age=60" }
+          });
+          ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
         }
         return response;
       }

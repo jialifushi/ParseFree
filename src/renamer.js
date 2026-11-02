@@ -71,37 +71,73 @@ export function formatNodeDisplayName(rawName = "", index = 0, {
 
 /**
  * 重写标准节点 URI 链接中的节点名称
+ * 支持：
+ * 1. 标准 V2RayN JSON 格式 (vmess://base64(json))
+ * 2. 小火箭/Quantumult 风格 VMess (vmess://base64?remarks=...#...)
+ * 3. 带有 # 备注或 ?remarks= 查询参数的协议 (ss, anytls, trojan, vless, hysteria 等)
  */
 export function renameUriNode(uri, index = 0, options = {}) {
   if (!uri || typeof uri !== "string") return uri;
 
-  // 1. VMess 协议 URI
+  // 1. VMess 协议 URI: 优先尝试标准 V2RayN JSON 格式
   if (uri.startsWith("vmess://")) {
+    const rawRest = uri.slice(8).trim();
     try {
-      const b64 = uri.slice(8).trim();
-      const jsonStr = fromBase64(b64);
-      const vmessObj = JSON.parse(jsonStr);
-      const currentName = vmessObj.ps || "";
-      vmessObj.ps = formatNodeDisplayName(currentName, index, options);
-      return "vmess://" + toBase64(JSON.stringify(vmessObj));
+      const questionIdx = rawRest.indexOf("?");
+      const hashIdx = rawRest.indexOf("#");
+      let b64Part = rawRest;
+      if (questionIdx !== -1) b64Part = rawRest.substring(0, questionIdx);
+      else if (hashIdx !== -1) b64Part = rawRest.substring(0, hashIdx);
+
+      const jsonStr = fromBase64(b64Part.trim());
+      if (jsonStr.startsWith("{") && jsonStr.endsWith("}")) {
+        const vmessObj = JSON.parse(jsonStr);
+        const currentName = vmessObj.ps || "";
+        vmessObj.ps = formatNodeDisplayName(currentName, index, options);
+        return "vmess://" + toBase64(JSON.stringify(vmessObj));
+      }
     } catch (e) {
-      return uri;
+      // 无法作为 JSON 解析，继续向下执行按 Shadowrocket query / hash 格式处理
     }
   }
 
-  // 2. 带有 # 备注名称的标准 URI (ss://, trojan://, vless://, anytls://, etc.)
-  const hashIdx = uri.indexOf("#");
+  // 2. 带有 # 备注名称或 ?remarks= 的各类 URI (Shadowrocket-style vmess, ss, anytls, trojan 等)
+  let workingUri = uri;
+  const hashIdx = workingUri.indexOf("#");
+  let rawName = "";
+
   if (hashIdx !== -1) {
-    const basePart = uri.substring(0, hashIdx);
-    const rawNameEncoded = uri.substring(hashIdx + 1);
-    let rawName = "";
+    const rawNameEncoded = workingUri.substring(hashIdx + 1);
     try {
       rawName = decodeURIComponent(rawNameEncoded);
     } catch (e) {
       rawName = rawNameEncoded;
     }
+  } else {
+    const remarksMatch = workingUri.match(/[?&]remarks=([^&#]*)/i);
+    if (remarksMatch) {
+      try {
+        rawName = decodeURIComponent(remarksMatch[1]);
+      } catch (e) {
+        rawName = remarksMatch[1];
+      }
+    }
+  }
+
+  if (rawName || hashIdx !== -1) {
     const newName = formatNodeDisplayName(rawName, index, options);
-    return `${basePart}#${encodeURIComponent(newName)}`;
+    const encodedNewName = encodeURIComponent(newName);
+
+    if (/[?&]remarks=/i.test(workingUri)) {
+      workingUri = workingUri.replace(/([?&]remarks=)[^&#]*/i, `$1${encodedNewName}`);
+    }
+
+    if (hashIdx !== -1) {
+      workingUri = `${workingUri.substring(0, hashIdx)}#${encodedNewName}`;
+    } else {
+      workingUri = `${workingUri}#${encodedNewName}`;
+    }
+    return workingUri;
   }
 
   return uri;

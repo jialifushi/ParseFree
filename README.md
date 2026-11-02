@@ -173,9 +173,15 @@ npm run deploy
 ### 1. Shadowrocket (小火箭 - iOS)
 1. 打开 Shadowrocket，点击右上角 `+` 号。
 2. 类型选择 **Subscribe (订阅)**。
-3. URL 填入带凭证的链接：`https://your-worker.workers.dev/sub?token=您的密码`。
+3. URL 填入订阅链接（推荐使用 Base64 格式）：
+   - **推荐格式（Base64 订阅）**：`https://your-worker.workers.dev/sub?b64=1&token=您的密码`
+   - **通用明文格式**：`https://your-worker.workers.dev/sub?token=您的密码`
 4. 备注填写 `ParseFree`，点击右上角“完成”。
-5. 下拉列表刷新后，首节点将清晰展示为 **`HOS Daily官方维护02`**（依更新日期而变），一眼即可确认今天是否已更新！
+5. 下拉列表刷新后，首节点将清晰展示为 **`HOS Daily官方维护02`**（依更新日期而变），普通节点均带有 **`HOS自动化线路 `** 前缀！
+
+> 💡 **为什么此前导入过小火箭后，再次更新名称依然是旧的？**
+> 1. **小火箭本地防覆盖机制**：小火箭为了防止冲掉用户自行手改的节点名称，如果节点服务器地址与端口已存在于本地数据库中，明文更新默认保留本地已有备注；**建议优先使用 Base64 订阅链接**，或在小火箭中**左滑删除旧订阅后重新添加**即可彻底更新！
+> 2. **边缘缓存击穿**：ParseFree v3.2.0 已默认针对客户端下发 `no-cache, no-store` 标头，并在 CacheKey 中注入版本号，避免 Cloudflare 边缘节点缓存旧数据。如需立即强刷，可在链接后加上 `&refresh=1`。
 
 ---
 

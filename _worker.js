@@ -788,37 +788,73 @@ function formatNodeDisplayName(rawName = "", index = 0, {
 
 /**
  * 重写标准节点 URI 链接中的节点名称
+ * 支持：
+ * 1. 标准 V2RayN JSON 格式 (vmess://base64(json))
+ * 2. 小火箭/Quantumult 风格 VMess (vmess://base64?remarks=...#...)
+ * 3. 带有 # 备注或 ?remarks= 查询参数的协议 (ss, anytls, trojan, vless, hysteria 等)
  */
 function renameUriNode(uri, index = 0, options = {}) {
   if (!uri || typeof uri !== "string") return uri;
 
-  // 1. VMess 协议 URI
+  // 1. VMess 协议 URI: 优先尝试标准 V2RayN JSON 格式
   if (uri.startsWith("vmess://")) {
+    const rawRest = uri.slice(8).trim();
     try {
-      const b64 = uri.slice(8).trim();
-      const jsonStr = fromBase64(b64);
-      const vmessObj = JSON.parse(jsonStr);
-      const currentName = vmessObj.ps || "";
-      vmessObj.ps = formatNodeDisplayName(currentName, index, options);
-      return "vmess://" + toBase64(JSON.stringify(vmessObj));
+      const questionIdx = rawRest.indexOf("?");
+      const hashIdx = rawRest.indexOf("#");
+      let b64Part = rawRest;
+      if (questionIdx !== -1) b64Part = rawRest.substring(0, questionIdx);
+      else if (hashIdx !== -1) b64Part = rawRest.substring(0, hashIdx);
+
+      const jsonStr = fromBase64(b64Part.trim());
+      if (jsonStr.startsWith("{") && jsonStr.endsWith("}")) {
+        const vmessObj = JSON.parse(jsonStr);
+        const currentName = vmessObj.ps || "";
+        vmessObj.ps = formatNodeDisplayName(currentName, index, options);
+        return "vmess://" + toBase64(JSON.stringify(vmessObj));
+      }
     } catch (e) {
-      return uri;
+      // 无法作为 JSON 解析，继续向下执行按 Shadowrocket query / hash 格式处理
     }
   }
 
-  // 2. 带有 # 备注名称的标准 URI (ss://, trojan://, vless://, anytls://, etc.)
-  const hashIdx = uri.indexOf("#");
+  // 2. 带有 # 备注名称或 ?remarks= 的各类 URI (Shadowrocket-style vmess, ss, anytls, trojan 等)
+  let workingUri = uri;
+  const hashIdx = workingUri.indexOf("#");
+  let rawName = "";
+
   if (hashIdx !== -1) {
-    const basePart = uri.substring(0, hashIdx);
-    const rawNameEncoded = uri.substring(hashIdx + 1);
-    let rawName = "";
+    const rawNameEncoded = workingUri.substring(hashIdx + 1);
     try {
       rawName = decodeURIComponent(rawNameEncoded);
     } catch (e) {
       rawName = rawNameEncoded;
     }
+  } else {
+    const remarksMatch = workingUri.match(/[?&]remarks=([^&#]*)/i);
+    if (remarksMatch) {
+      try {
+        rawName = decodeURIComponent(remarksMatch[1]);
+      } catch (e) {
+        rawName = remarksMatch[1];
+      }
+    }
+  }
+
+  if (rawName || hashIdx !== -1) {
     const newName = formatNodeDisplayName(rawName, index, options);
-    return `${basePart}#${encodeURIComponent(newName)}`;
+    const encodedNewName = encodeURIComponent(newName);
+
+    if (/[?&]remarks=/i.test(workingUri)) {
+      workingUri = workingUri.replace(/([?&]remarks=)[^&#]*/i, `$1${encodedNewName}`);
+    }
+
+    if (hashIdx !== -1) {
+      workingUri = `${workingUri.substring(0, hashIdx)}#${encodedNewName}`;
+    } else {
+      workingUri = `${workingUri}#${encodedNewName}`;
+    }
+    return workingUri;
   }
 
   return uri;
@@ -1093,20 +1129,26 @@ function renderDashboardHtml({
     <div class="card">
       <div class="card-title">客户端订阅链接</div>
       <div style="margin-bottom: 12px;">
-        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. 通用明文订阅链接 (与 格式.txt 一致，导入小火箭 / v2rayN / sing-box)：</div>
-        <div class="input-group">
-          <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
-          <button class="btn btn-primary" onclick="copyText('${subUrl}')">复制订阅链接</button>
-        </div>
-      </div>
-      <div style="margin-bottom: 14px;">
-        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">2. Base64 编码订阅链接 (兼容仅认 base64 的旧版客户端)：</div>
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. Base64 订阅链接 (🔥 推荐小火箭 Shadowrocket / v2rayN 导入，全量同步覆盖备注)：</div>
         <div class="input-group">
           <input type="text" class="input-control" readonly id="b64SubInput" value="${b64SubUrl}">
-          <button class="btn btn-default" onclick="copyText('${b64SubUrl}')">复制 Base64 链接</button>
+          <button class="btn btn-primary" onclick="copyText('${b64SubUrl}')">复制 Base64 订阅</button>
         </div>
       </div>
-      <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
+      <div style="margin-bottom: 12px;">
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">2. 通用明文订阅链接 (单行 URI 格式，与 格式.txt 一致)：</div>
+        <div class="input-group">
+          <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
+          <button class="btn btn-default" onclick="copyText('${subUrl}')">复制明文链接</button>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+        <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
+        <button class="btn btn-default" onclick="forceRefreshData()">强制刷新源数据并穿透缓存</button>
+      </div>
+      <div style="background: #fdf6ec; border: 1px solid #faecd8; border-radius: 4px; padding: 10px 12px; font-size: 12px; color: #e6a23c; line-height: 1.5;">
+        <strong>💡 小火箭更新提示：</strong>小火箭对已导入过的节点默认会保留本地旧备注。若小火箭拉取后名称未更新，建议在小火箭中<strong>左滑删除旧订阅重新添加</strong>，或优先使用上方 <strong>Base64 订阅链接</strong> 下拉刷新。
+      </div>
     </div>
 
     <!-- 5. 节点列表预览卡片 -->
@@ -1137,6 +1179,11 @@ function renderDashboardHtml({
     }
     function copyAllNodes() { copyText(allNodes.join("\\n")); }
 
+    function forceRefreshData() {
+      const u = new URL(window.location.href);
+      u.searchParams.set("refresh", "1");
+      window.location.href = u.toString();
+    }
     function switchMode(m) {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
       if (m === "auto") {
@@ -1196,6 +1243,9 @@ const CLIENT_UA_PATTERNS = [
   "surge", "sing-box", "nekobox", "surfboard", "curl", "wget"
 ];
 
+// 版本标识：代码更新后自动使 Cloudflare 旧版本边缘缓存完全失效
+const WORKER_VERSION = "3.2.0";
+
 function isProxyClient(userAgent = "") {
   const ua = userAgent.toLowerCase();
   return CLIENT_UA_PATTERNS.some(p => ua.includes(p));
@@ -1226,12 +1276,21 @@ export default {
     const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
     const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
 
-    // 3. 边缘缓存处理 (Cloudflare Cache API)
+    // 3. 边缘缓存处理 (注入版本号以保证代码更新后旧缓存立即失效)
     const cache = typeof caches !== "undefined" ? caches.default : null;
-    const cacheKey = new Request(url.toString(), request);
+    const cacheKeyUrl = new URL(url.toString());
+    cacheKeyUrl.searchParams.set("_worker_v", WORKER_VERSION);
+    const cacheKey = new Request(cacheKeyUrl.toString(), request);
     if (cache && !forceRefresh && request.method === "GET") {
       const cached = await cache.match(cacheKey);
-      if (cached) return cached;
+      if (cached) {
+        // 确保客户端始终收到禁止本地缓存标头，避免手机客户端缓存旧备注
+        const clientRes = new Response(cached.body, cached);
+        clientRes.headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        clientRes.headers.set("Pragma", "no-cache");
+        clientRes.headers.set("Expires", "0");
+        return clientRes;
+      }
     }
 
     try {
@@ -1267,8 +1326,13 @@ export default {
 
         const headers = {
           "Content-Type": "text/plain; charset=utf-8",
-          "Cache-Control": "public, max-age=1800",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0",
           "Access-Control-Allow-Origin": "*",
+          "Subscription-Userinfo": "upload=0; download=0; total=10737418240000; expire=0",
+          "Profile-Update-Interval": "6",
+          "Content-Disposition": `attachment; filename="ParseFree_${data.sourceDate || 'sub'}.txt"`,
           "X-Total-Nodes": String(nodes.length),
           "X-Source-Date": encodeURIComponent(String(data.sourceDate || "unknown")),
           "X-Source-Type": encodeURIComponent(String(data.type))
@@ -1276,7 +1340,11 @@ export default {
 
         const response = new Response(bodyText, { status: 200, headers });
         if (cache && ctx && typeof ctx.waitUntil === "function") {
-          ctx.waitUntil(cache.put(cacheKey, response.clone()));
+          const edgeCacheRes = new Response(bodyText, {
+            status: 200,
+            headers: { ...headers, "Cache-Control": "public, max-age=60" }
+          });
+          ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
         }
         return response;
       }

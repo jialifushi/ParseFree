@@ -173,20 +173,26 @@ export function renderDashboardHtml({
     <div class="card">
       <div class="card-title">客户端订阅链接</div>
       <div style="margin-bottom: 12px;">
-        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. 通用明文订阅链接 (与 格式.txt 一致，导入小火箭 / v2rayN / sing-box)：</div>
-        <div class="input-group">
-          <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
-          <button class="btn btn-primary" onclick="copyText('${subUrl}')">复制订阅链接</button>
-        </div>
-      </div>
-      <div style="margin-bottom: 14px;">
-        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">2. Base64 编码订阅链接 (兼容仅认 base64 的旧版客户端)：</div>
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. Base64 订阅链接 (🔥 推荐小火箭 Shadowrocket / v2rayN 导入，全量同步覆盖备注)：</div>
         <div class="input-group">
           <input type="text" class="input-control" readonly id="b64SubInput" value="${b64SubUrl}">
-          <button class="btn btn-default" onclick="copyText('${b64SubUrl}')">复制 Base64 链接</button>
+          <button class="btn btn-primary" onclick="copyText('${b64SubUrl}')">复制 Base64 订阅</button>
         </div>
       </div>
-      <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
+      <div style="margin-bottom: 12px;">
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">2. 通用明文订阅链接 (单行 URI 格式，与 格式.txt 一致)：</div>
+        <div class="input-group">
+          <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
+          <button class="btn btn-default" onclick="copyText('${subUrl}')">复制明文链接</button>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+        <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
+        <button class="btn btn-default" onclick="forceRefreshData()">强制刷新源数据并穿透缓存</button>
+      </div>
+      <div style="background: #fdf6ec; border: 1px solid #faecd8; border-radius: 4px; padding: 10px 12px; font-size: 12px; color: #e6a23c; line-height: 1.5;">
+        <strong>💡 小火箭更新提示：</strong>小火箭对已导入过的节点默认会保留本地旧备注。若小火箭拉取后名称未更新，建议在小火箭中<strong>左滑删除旧订阅重新添加</strong>，或优先使用上方 <strong>Base64 订阅链接</strong> 下拉刷新。
+      </div>
     </div>
 
     <!-- 5. 节点列表预览卡片 -->
@@ -217,6 +223,11 @@ export function renderDashboardHtml({
     }
     function copyAllNodes() { copyText(allNodes.join("\\n")); }
 
+    function forceRefreshData() {
+      const u = new URL(window.location.href);
+      u.searchParams.set("refresh", "1");
+      window.location.href = u.toString();
+    }
     function switchMode(m) {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
       if (m === "auto") {

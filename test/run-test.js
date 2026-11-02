@@ -21,6 +21,12 @@ async function runTests() {
   assert(firstNode.includes(encodeURIComponent("HOS Daily官方维护02")), "首节点名称必须包含日后缀 '02'，如 HOS Daily官方维护02");
   console.log("   ✓ 首节点成功显示为: HOS Daily官方维护02 (可通过第一条直观识别更新状态)");
 
+  // 1.1 校验针对小火箭的订阅标头与防缓存标头
+  assert.strictEqual(resSub.headers.get("Cache-Control"), "no-cache, no-store, must-revalidate", "客户端响应必须下发 no-cache 防小火箭本地缓存");
+  assert(resSub.headers.get("Subscription-Userinfo"), "必须下发 Subscription-Userinfo 触发小火箭托管订阅更新");
+  assert.strictEqual(resSub.headers.get("Profile-Update-Interval"), "6", "必须下发 Profile-Update-Interval 自动更新周期");
+  console.log("   ✓ 小火箭托管订阅标头与缓存击穿标头验证通过");
+
   // 2. 验证普通节点前缀 (HOS自动化线路)
   const secondNode = lines[1];
   const b64 = secondNode.replace("vmess://", "");
@@ -48,8 +54,17 @@ async function runTests() {
   assert(cLines[0].includes(encodeURIComponent("定制官方节点02")), "自定义首节点名称同样应自动附加 '02' 后缀");
   console.log("   ✓ 自定义名称自动追加日后缀验证通过: 定制官方节点02");
 
-  // 5. 测试打包产物 dist/worker.js 与 _worker.js
-  console.log("5. 测试打包产物 dist/worker.js 与 _worker.js 独立运行...");
+  // 5. 测试小火箭 Base64 订阅输出 (?b64=1)
+  console.log("5. 测试 Base64 订阅输出 (?b64=1)...");
+  const resB64 = await worker.fetch(new Request("http://localhost:8787/sub?b64=1"), {});
+  assert.strictEqual(resB64.status, 200);
+  const b64Text = await resB64.text();
+  const decodedFromB64 = Buffer.from(b64Text, "base64").toString("utf-8");
+  assert(decodedFromB64.includes(encodeURIComponent("HOS Daily官方维护02")), "Base64 解码后必须包含正确的首节点");
+  console.log("   ✓ Base64 订阅输出与解码验证通过");
+
+  // 6. 测试打包产物 dist/worker.js 与 _worker.js
+  console.log("6. 测试打包产物 dist/worker.js 与 _worker.js 独立运行...");
   const resDist = await distWorkerModule.fetch(new Request("http://localhost:8787/sub"), {});
   assert.strictEqual(resDist.status, 200);
   const distLines = (await resDist.text()).split("\n").map(l => l.trim()).filter(Boolean);
