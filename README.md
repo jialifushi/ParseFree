@@ -12,6 +12,7 @@
 ## 📑 目录
 
 - [核心工作机制（自动递增与停止探测）](#-核心工作机制自动递增与停止探测)
+- [节点清洗与自定义重命名](#-节点清洗与自定义重命名)
 - [核心特性](#-核心特性)
 - [支持协议与转换对照](#-支持协议与转换对照)
 - [部署教程](#-部署教程)
@@ -20,9 +21,6 @@
   - [方式三：Wrangler 命令行部署（开发者适用）](#方式三wrangler-命令行部署开发者适用)
   - [进阶：绑定自定义域名](#进阶绑定自定义域名)
 - [🔄 运行模式与数据源配置](#-运行模式与数据源配置)
-  - [1. 自动日期递增模式 (Auto Date Mode)](#1-自动日期递增模式-auto-date-mode)
-  - [2. 手动编辑地址模式 (Manual Mode)](#2-手动编辑地址模式-manual-mode)
-  - [3. Clash 与 V2Ray 格式源支持](#3-clash-与-v2ray-格式源支持)
 - [🔐 账号密码与访问鉴权设置](#-账号密码与访问鉴权设置)
 - [📡 订阅接口与参数详解](#-订阅接口与参数详解)
 - [📱 常见客户端配置指南](#-常见客户端配置指南)
@@ -56,15 +54,47 @@ flowchart TD
 
 ---
 
+## 🏷️ 节点清洗与自定义重命名
+
+源数据中的节点名称往往混有推广广告（例如首节点的 `tg频道:@freenodedaily`），导入小火箭/代理软件后十分影响体验。
+
+ParseFree 内置了强大的**广告清洗与节点重命名引擎**：
+
+| 节点类型 | 原始节点示例 | 转换清洗后在客户端的展示 |
+| :--- | :--- | :--- |
+| **首节点 / 推广广告** | `tg频道:@freenodedaily` | **`HOS Daily官方维护`**（自动清理宣传信息） |
+| **普通节点** | `🇭🇰 香港` | **`HOS自动化线路 🇭🇰 香港`**（自动附带线路前缀） |
+| **普通节点 2** | `🇯🇵 日本` | **`HOS自动化线路 🇯🇵 日本`** |
+
+### 🛠️ 自定义配置方式（支持环境变量与 URL 参数）
+
+如果不希望使用默认名称，可通过以下任意方式自由自定义：
+
+1. **方式 A：Cloudflare 环境变量（全局生效，推荐）**
+   在 Cloudflare 后台设置以下变量：
+   - `FIRST_NODE_NAME`：首节点 / 广告替换名称（例如：`我的私有维护节点`）
+   - `NODE_PREFIX`：普通节点前缀（例如：`高速专线 `）
+
+2. **方式 B：URL 查询参数（随需即用）**
+   在订阅链接中直接传参覆盖：
+   ```text
+   https://your-worker.workers.dev/sub?first_name=专属线路&prefix=极速专线-
+   ```
+
+3. **方式 C：Web 控制面板即时设置**
+   在浏览器打开 Worker 首页，在“节点命名与广告清理设置”卡片中输入自定义名称并点击应用，一键复制的订阅链接将自动附带参数！
+
+---
+
 ## ✨ 核心特性
 
 - 🔄 **自动日期更新 + 成功后停止探测**：无需手动修改日期，每日 00 点后自动更新并智能锁定。
+- 🏷️ **智能广告清洗与统一前缀**：首节点自动识别宣传信息并更换为 `HOS Daily官方维护`，其他节点统一前缀 `HOS自动化线路 `。
 - 📝 **支持手动编辑地址**：在 Web 界面或环境变量中随时手动指定、编辑任何固定订阅地址。
 - 🌐 **双格式源支持 (Clash / V2Ray)**：支持从 Clash (`.yaml`) 或 V2Ray (`.txt`) 获取源数据，并具备防漏发自动兜底机制。
 - 🔒 **访问安全鉴权**：支持配置账号密码保护（`AUTH_PASSWORD` / `AUTH_USERNAME`），防止订阅被他人盗用。
 - 🎯 **全协议标准转换**：实时将节点转换为标准节点 URI 链接（与 [`格式.txt`](格式.txt) 完全对齐），支持小火箭、v2rayN、Sing-box 等。
 - 💻 **优雅后台控制台**：浏览器直接打开即可切换模式、编辑地址、查看可用节点列表并一键复制。
-- ⚡ **开箱即用**：提供开箱即用的单文件版 [`dist/worker.js`](dist/worker.js) 与根目录 [`_worker.js`](_worker.js)，全平台自适应。
 
 ---
 
@@ -75,7 +105,7 @@ flowchart TD
 | 协议类型 | 输出节点 URI 格式 | 说明 |
 | :--- | :--- | :--- |
 | **VMess** | `vmess://<Base64-JSON>` | 采用 V2RayN 标准 JSON 格式，全平台通用，自动保留 TLS/WS 等参数 |
-| **Shadowsocks** | `ss://<Base64(cipher:password)>@host:port#name` | SIP002 标准格式 |
+| **Shadowsocks** | `ss://<Base64(cipher:password)>@host:port#name` | SIP002 标准格式，名称已统一重命名 |
 | **AnyTLS** | `anytls://password@host:port?security=tls&sni=...#name` | AnyTLS 协议标准分享链接 |
 | **Trojan** | `trojan://password@host:port?security=tls&sni=...#name` | 标准 Trojan 链接 |
 | **VLESS** | `vless://uuid@host:port?security=...&sni=...#name` | 标准 VLESS 链接 |
@@ -102,10 +132,10 @@ flowchart TD
    - **框架预设 (Framework preset)**：选择 **None**。
    - **构建命令 (Build command)**：留空（或填 `npm run build`）。
    - **输出目录 (Build output directory)**：留空（项目根目录自带 `_worker.js` 与 `wrangler.toml`，Cloudflare 会自动识别）。
-   - **环境变量 (Environment variables)**（可选，配置账号密码）：
-     - 点击展开 **Environment variables**；
-     - 添加 `AUTH_PASSWORD`，填入您的密码（如 `MySecret2026`）；
-     - 可选添加 `AUTH_USERNAME`，填入用户名（如 `admin`）。
+   - **环境变量 (Environment variables)**（可选，配置账号密码与自定义命名）：
+     - `AUTH_PASSWORD`：访问密码（如 `MySecret2026`）
+     - `FIRST_NODE_NAME`：自定义首节点名称（默认 `HOS Daily官方维护`）
+     - `NODE_PREFIX`：自定义普通节点前缀（默认 `HOS自动化线路 `）
 4. **保存并部署**
    - 点击底部的 **Save and Deploy (保存并部署)**。
    - 等待约 30 秒，项目即部署完成并生成专属访问域名！
@@ -118,7 +148,7 @@ flowchart TD
 2. 命名后点击 **Deploy**，接着点击右上角 **Edit Code**。
 3. 打开本项目中的 [**`dist/worker.js`**](dist/worker.js) 文件，复制其全部代码。
 4. 清空网页编辑器中的默认代码，粘贴复制的内容，点击右上角 **Save and Deploy** 即可完成！
-5. 如需设置密码：在 Worker 详情页进入 **Settings -> Variables and Secrets** 添加 `AUTH_PASSWORD` 即可。
+5. 如需设置密码：在 Worker 详情页进入 **Settings -> Variables and Secrets** 添加环境变量即可。
 
 ---
 
@@ -140,76 +170,15 @@ npm run deploy
 
 ---
 
-### 进阶：绑定自定义域名
-
-若您所在地区访问 `*.workers.dev` 受到干扰，建议绑定自己的二级域名：
-
-1. 在 Cloudflare Dashboard 打开已部署的项目。
-2. 点击 **Settings (设置)** -> **Domains & Routes (域和路由)**。
-3. 点击 **Add -> Custom Domain (自定义域)**，输入托管在 Cloudflare 上的域名（如 `sub.yourdomain.com`）。
-4. 稍等 1~2 分钟证书生效后，即可使用该专属域名作为订阅地址！
-
----
-
-## 🔄 运行模式与数据源配置
-
-### 1. 自动日期递增模式 (Auto Date Mode)
-- **默认模式**：无需任何配置，系统自动计算北京时间。
-- 每天 00:00 自动将日期递增为当天，自动探测当天地址（例如 `.../20261103-clash.yaml`）；
-- **一旦拿到数据，立即停止后续定时获取并锁定**；
-- 若当天未出，自动回退使用昨日有效节点。
-
-### 2. 手动编辑地址模式 (Manual Mode)
-- **Web 界面即时编辑**：在浏览器打开 Worker 首页，切换到“手动编辑指定地址模式”，在输入框中填入任意地址并点击“应用此地址”，系统会实时解析该地址并生成对应的订阅链接。
-- **URL 参数直连**：直接在订阅链接追加 `?source=目标URL`：
-  ```text
-  https://your-worker.workers.dev/sub?source=https://free.datiya.com/uploads/20261102-clash.yaml
-  ```
-- **环境变量固定**：在 Cloudflare 环境变量中添加 `CUSTOM_SOURCE_URL=https://...` 即可全局固定源地址。
-
-### 3. Clash 与 V2Ray 格式源支持
-- 支持获取 Clash 格式（`...-clash.yaml`）或 V2Ray 格式（`...-v2ray.txt`）；
-- 在 Web 控制台可一键切换，或在链接追加 `?type=v2ray` / `?type=clash`；
-- **防漏发兜底机制**：若源站某天上传的 `v2ray.txt` 出现空白或未更新，系统会自动切换读取同期的 `clash.yaml`，确保始终能拿到节点！
-
----
-
-## 🔐 账号密码与访问鉴权设置
-
-### 1. 环境变量配置说明
-
-在 Cloudflare 项目的 **Settings (设置) -> Variables and Secrets (变量和密码)** 中添加以下变量：
-
-| 变量名称 | 是否必填 | 示例值 | 说明 |
-| :--- | :--- | :--- | :--- |
-| **`AUTH_PASSWORD`** | 推荐 | `MySecret2026` | 访问密钥 / 密码（也可设置 `AUTH_TOKEN`） |
-| **`AUTH_USERNAME`** | 可选 | `admin` | 访问用户名（若不填，客户端只需匹配密码即可） |
-
----
-
-### 2. 携带凭证的访问方式
-
-- **方式 A：URL 查询参数（最简便，推荐导入客户端）**
-  在客户端填写的订阅链接末尾直接追加 `?token=您的密码`：
-  ```text
-  https://your-worker.workers.dev/sub?token=MySecret2026
-  ```
-- **方式 B：标准 URL 认证格式**
-  ```text
-  https://admin:MySecret2026@your-worker.workers.dev/sub
-  ```
-- **方式 C：浏览器 Web 控制台原生登录**
-  直接在浏览器中打开 Worker 地址，会自动弹出 HTTP Basic Auth 登录对话框，输入用户名和密码即可。登录后复制订阅链接会自动附带您的 token 参数！
-
----
-
 ## 📡 订阅接口与参数详解
 
 | 接口 / 参数 | 完整示例 | 用途说明 |
 | :--- | :--- | :--- |
-| **Web 控制台** | `https://your-domain/?token=xxx` | 可视化查看状态、切换模式、手动编辑地址及一键复制 |
-| **通用明文订阅** | `https://your-domain/sub?token=xxx` | **与 `格式.txt` 结构一致**，每行一个节点，现代客户端首选 |
+| **Web 控制台** | `https://your-domain/?token=xxx` | 可视化查看状态、切换模式、手动编辑地址及自定义命名 |
+| **通用明文订阅** | `https://your-domain/sub?token=xxx` | **首节点已清洗，其他节点带前缀**，现代客户端首选 |
 | **Base64 订阅** | `https://your-domain/sub?b64=1&token=xxx` | 输出 Base64 编码文本，兼容仅识别 Base64 的旧版客户端 |
+| **自定义首节点名称** | `https://your-domain/sub?first_name=我的专线&token=xxx` | 覆盖默认的“HOS Daily官方维护” |
+| **自定义普通节点前缀** | `https://your-domain/sub?prefix=专线-&token=xxx` | 覆盖默认的“HOS自动化线路 ” |
 | **指定 V2Ray 源** | `https://your-domain/sub?type=v2ray&token=xxx` | 切换为拉取 V2Ray 格式源（空内容自动兜底） |
 | **手动指定外部源** | `https://your-domain/sub?source=https://...&token=xxx` | 传入任意外部 Clash/V2Ray 链接进行在线解析转换 |
 | **地区关键词过滤** | `https://your-domain/sub?filter=香港&token=xxx` | 仅拉取节点名称中包含“香港”的节点 |
@@ -224,7 +193,7 @@ npm run deploy
 2. 类型选择 **Subscribe (订阅)**。
 3. URL 填入带凭证的链接：`https://your-worker.workers.dev/sub?token=您的密码`。
 4. 备注填写 `ParseFree`，点击右上角“完成”。
-5. 下拉列表即可刷新并获取全部节点。
+5. 下拉列表即可刷新并获取全部节点。所有节点名称均已规范清洗，首节点为维护节点，其余节点带统一前缀。
 
 ### 2. v2rayN (Windows)
 1. 点击上方菜单栏 **订阅分组** -> **订阅分组设置**。
@@ -242,7 +211,7 @@ npm run deploy
 ## 🧪 本地开发与测试
 
 ```bash
-# 运行全部集成与鉴权自动化测试
+# 运行全部集成、鉴权与重命名自动化测试
 npm test
 
 # 重新构建单文件 dist/worker.js 与 _worker.js

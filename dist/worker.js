@@ -5,10 +5,11 @@
  *
  * 核心功能：
  * 1. 每日00点后自动递增更新地址，一旦获取成功自动停止探测并锁定
- * 2. 支持手动编辑地址与自动日期模式切换
- * 3. 支持 Clash 与 V2Ray 两种源格式互相转换
- * 4. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
- * 5. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
+ * 2. 自动识别并清理 "tg频道:@freenodedaily" 等宣传信息，更换为 "HOS Daily官方维护"
+ * 3. 自动为普通节点名称增加前缀 "HOS自动化线路 "，支持环境变量与 URL 参数深度自定义
+ * 4. 支持手动编辑地址与自动日期模式切换，支持 Clash 与 V2Ray 两种源格式
+ * 5. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
+ * 6. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
  */
 
 // ==================== 1. 通用工具模块 ====================
@@ -659,7 +660,110 @@ async function handleScheduledTask(env = {}) {
   }
 }
 
-// ==================== 6. 账号密码鉴权模块 ====================
+// ==================== 6. 节点名称清洗与重命名模块 ====================
+/**
+ * 节点名称清洗与自定义重命名模块
+ * 1. 识别并清理源数据中的广告/宣传信息（如 "tg频道:@freenodedaily"），替换为指定的首节点名称
+ * 2. 为其他所有节点自动增加指定前缀（如 "HOS自动化线路 "）
+ * 3. 支持环境变量 (FIRST_NODE_NAME / NODE_PREFIX) 与 URL 参数自定义
+ */
+
+
+
+const DEFAULT_FIRST_NODE_NAME = "HOS Daily官方维护";
+const DEFAULT_NODE_PREFIX = "HOS自动化线路 ";
+
+// 常见广告与宣传特征正则表达式
+const AD_PATTERNS = [
+  /tg(?:频道|群|社区)?[:：\s]*@/i,
+  /@freenode/i,
+  /telegram/i,
+  /@\w+/i,
+  /关注频道/i,
+  /发布页/i,
+  /官网/i,
+  /最新地址/i,
+  /每日更新/i
+];
+
+/**
+ * 判断指定节点名称是否属于宣传广告
+ */
+function isAdvertisement(name = "", index = 0) {
+  if (!name) return false;
+  // 若是首个节点且包含 tg 或 @ 符号，直接判定为宣传节点
+  if (index === 0 && /(tg|@|http|频道|群)/i.test(name)) {
+    return true;
+  }
+  return AD_PATTERNS.some(p => p.test(name));
+}
+
+/**
+ * 格式化单个节点的名称
+ */
+function formatNodeDisplayName(rawName = "", index = 0, {
+  firstName = DEFAULT_FIRST_NODE_NAME,
+  prefix = DEFAULT_NODE_PREFIX
+} = {}) {
+  const trimmed = rawName.trim();
+  // 命中广告特征或者是首个宣传节点
+  if (isAdvertisement(trimmed, index)) {
+    return firstName || DEFAULT_FIRST_NODE_NAME;
+  }
+  // 普通节点：若尚未包含该前缀，则添加前缀
+  if (prefix && !trimmed.startsWith(prefix.trim())) {
+    return `${prefix}${trimmed}`;
+  }
+  return trimmed;
+}
+
+/**
+ * 重写标准节点 URI 链接中的节点名称
+ * 支持 VMess (JSON ps 字段)、SS/Trojan/VLESS/AnyTLS (URI # 哈希名称)
+ */
+function renameUriNode(uri, index = 0, options = {}) {
+  if (!uri || typeof uri !== "string") return uri;
+
+  // 1. VMess 协议 URI
+  if (uri.startsWith("vmess://")) {
+    try {
+      const b64 = uri.slice(8).trim();
+      const jsonStr = fromBase64(b64);
+      const vmessObj = JSON.parse(jsonStr);
+      const currentName = vmessObj.ps || "";
+      vmessObj.ps = formatNodeDisplayName(currentName, index, options);
+      return "vmess://" + toBase64(JSON.stringify(vmessObj));
+    } catch (e) {
+      return uri;
+    }
+  }
+
+  // 2. 其它带有 # 备注名称的标准 URI (ss://, trojan://, vless://, anytls://, etc.)
+  const hashIdx = uri.indexOf("#");
+  if (hashIdx !== -1) {
+    const basePart = uri.substring(0, hashIdx);
+    const rawNameEncoded = uri.substring(hashIdx + 1);
+    let rawName = "";
+    try {
+      rawName = decodeURIComponent(rawNameEncoded);
+    } catch (e) {
+      rawName = rawNameEncoded;
+    }
+    const newName = formatNodeDisplayName(rawName, index, options);
+    return `${basePart}#${encodeURIComponent(newName)}`;
+  }
+
+  return uri;
+}
+
+/**
+ * 批量处理并重命名节点链接列表
+ */
+function processAndRenameNodes(nodes = [], options = {}) {
+  return nodes.map((nodeUri, idx) => renameUriNode(nodeUri, idx, options));
+}
+
+// ==================== 7. 账号密码鉴权模块 ====================
 /**
  * 账号密码与访问鉴权模块
  * 支持环境变量配置：AUTH_USERNAME、AUTH_PASSWORD、AUTH_TOKEN
@@ -745,11 +849,11 @@ function buildAuthRequiredResponse() {
   );
 }
 
-// ==================== 7. UI 渲染模块 ====================
+// ==================== 8. UI 渲染模块 ====================
 /**
  * Web 控制台页面渲染模块
  * 遵循 Element Plus 企业级风格，简洁、专业、克制
- * 支持自动日期模式 / 手动编辑地址模式切换，支持 V2Ray / Clash 源切换
+ * 支持自动日期模式 / 手动编辑地址模式切换，支持 V2Ray / Clash 源切换与节点重命名规则自定义
  */
 
 function renderDashboardHtml({
@@ -761,13 +865,16 @@ function renderDashboardHtml({
   isToday,
   mode,
   type,
-  authInfo = {}
+  authInfo = {},
+  renameOptions = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
   const isProtected = Boolean(authInfo.active);
   const isAutoMode = mode !== "manual";
   const isV2ray = type === "v2ray";
+  const firstName = renameOptions.firstName || "HOS Daily官方维护";
+  const prefix = renameOptions.prefix !== undefined ? renameOptions.prefix : "HOS自动化线路 ";
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -793,18 +900,13 @@ function renderDashboardHtml({
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      background-color: var(--el-bg-color);
-      color: var(--el-text-primary);
-      line-height: 1.6;
-      padding: 24px 16px;
+      background-color: var(--el-bg-color); color: var(--el-text-primary);
+      line-height: 1.6; padding: 24px 16px;
     }
     .container { max-width: 960px; margin: 0 auto; }
     .card {
-      background: var(--card-bg);
-      border: 1px solid var(--el-border-light);
-      border-radius: 6px;
-      padding: 20px 24px;
-      margin-bottom: 20px;
+      background: var(--card-bg); border: 1px solid var(--el-border-light);
+      border-radius: 6px; padding: 20px 24px; margin-bottom: 20px;
     }
     .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-left: 4px solid var(--el-color-primary); padding-left: 10px; }
     .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 16px; }
@@ -844,7 +946,7 @@ function renderDashboardHtml({
   <div class="container">
     <div class="card" style="margin-bottom: 16px;">
       <h1 style="font-size: 18px; font-weight: 600; margin-bottom: 6px;">ParseFree 免费节点自动同步与转换服务</h1>
-      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。支持手动编辑与格式转换。</p>
+      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。广告信息自动清理，节点名称统一规范化。</p>
     </div>
 
     <!-- 1. 运行状态卡片 -->
@@ -872,9 +974,9 @@ function renderDashboardHtml({
       <div style="font-size: 13px; color: var(--el-text-regular); font-family: monospace; word-break: break-all; margin-top: 4px;">${targetUrl}</div>
     </div>
 
-    <!-- 2. 数据源配置与手动编辑卡片 -->
+    <!-- 2. 数据源模式设置与手动编辑卡片 -->
     <div class="card">
-      <div class="card-title">数据源模式设置与手动编辑</div>
+      <div class="card-title">数据源模式与手动编辑</div>
       <div style="margin-bottom: 14px;">
         <span style="font-size: 13px; font-weight: 600; margin-right: 12px;">运行模式：</span>
         <label class="radio-label"><input type="radio" name="workMode" value="auto" ${isAutoMode ? "checked" : ""} onchange="switchMode('auto')"> 自动日期递增模式 (每日00点后自动更新)</label>
@@ -892,16 +994,29 @@ function renderDashboardHtml({
           <button class="btn btn-primary" onclick="applyManualUrl()">应用此地址</button>
         </div>
       </div>
-      <div id="autoTip" style="font-size: 12px; color: var(--el-text-secondary); ${!isAutoMode ? 'display: none;' : ''}">
-        💡 自动模式下，系统会在每日 00:00 自动探测当天日期地址（例如 https://free.datiya.com/uploads/20261103-clash.yaml）。一旦探测到有效数据即锁定并停止探测；若当天未发布则自动平滑回溯前一天。
-      </div>
     </div>
 
-    <!-- 3. 订阅地址获取卡片 -->
+    <!-- 3. 自定义节点命名与广告清理卡片 -->
+    <div class="card">
+      <div class="card-title">节点命名与广告清理设置</div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 12px;">
+        <div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">首节点 / 广告宣传替换名称：</div>
+          <input type="text" class="input-control" id="firstNameInput" value="${firstName}" style="width: 100%;">
+        </div>
+        <div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">普通节点线路前缀：</div>
+          <input type="text" class="input-control" id="prefixInput" value="${prefix}" style="width: 100%;">
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="applyRenameOptions()">应用节点命名规则</button>
+    </div>
+
+    <!-- 4. 订阅地址获取卡片 -->
     <div class="card">
       <div class="card-title">客户端订阅链接</div>
       <div style="margin-bottom: 12px;">
-        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. 通用明文订阅链接 (与 格式.txt 一致，支持小火箭 / v2rayN / sing-box)：</div>
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. 通用明文订阅链接 (与 格式.txt 一致，导入小火箭 / v2rayN / sing-box)：</div>
         <div class="input-group">
           <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
           <button class="btn btn-primary" onclick="copyText('${subUrl}')">复制订阅链接</button>
@@ -917,7 +1032,7 @@ function renderDashboardHtml({
       <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
     </div>
 
-    <!-- 4. 节点列表卡片 -->
+    <!-- 5. 节点列表预览卡片 -->
     <div class="card">
       <div class="card-title">节点明细预览 (${nodeCount})</div>
       <div class="node-list">
@@ -947,11 +1062,9 @@ function renderDashboardHtml({
 
     function switchMode(m) {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
-      document.getElementById("autoTip").style.display = m === "auto" ? "block" : "none";
       if (m === "auto") {
         const u = new URL(window.location.href);
-        u.searchParams.delete("source");
-        u.searchParams.delete("mode");
+        u.searchParams.delete("source"); u.searchParams.delete("mode");
         window.location.href = u.toString();
       }
     }
@@ -962,9 +1075,19 @@ function renderDashboardHtml({
     }
     function applyManualUrl() {
       const val = document.getElementById("customInput").value.trim();
-      if (!val) return alert("请输入有效的节点地址");
+      if (!val) return alert("请输入有效地址");
       const u = new URL(window.location.href);
       u.searchParams.set("source", val);
+      window.location.href = u.toString();
+    }
+    function applyRenameOptions() {
+      const fn = document.getElementById("firstNameInput").value.trim();
+      const p = document.getElementById("prefixInput").value;
+      const u = new URL(window.location.href);
+      if (fn) u.searchParams.set("first_name", fn);
+      else u.searchParams.delete("first_name");
+      if (p) u.searchParams.set("prefix", p);
+      else u.searchParams.delete("prefix");
       window.location.href = u.toString();
     }
   </script>
@@ -972,11 +1095,12 @@ function renderDashboardHtml({
 </html>`;
 }
 
-// ==================== 8. Worker 主入口 ====================
+// ==================== 9. Worker 主入口 ====================
 /**
  * Cloudflare Worker 主入口
  * 支持 HTTP 请求路由处理与 Cron 定时事件监听 (scheduled)
  */
+
 
 
 
@@ -1014,6 +1138,10 @@ export default {
     const filterKeyword = searchParams.get("filter") || "";
     const forceRefresh = searchParams.get("refresh") === "1" || searchParams.get("force") === "1";
 
+    // 节点自定义名称与前缀参数（支持环境变量与 URL 参数）
+    const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
+    const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
+
     // 3. 边缘缓存处理 (Cloudflare Cache API)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKey = new Request(url.toString(), request);
@@ -1032,7 +1160,10 @@ export default {
       });
       let nodes = parseSubscription(data.content);
 
-      // 5. 关键词过滤
+      // 5. 广告宣传信息清洗与节点自定义重命名
+      nodes = processAndRenameNodes(nodes, { firstName, prefix });
+
+      // 6. 关键词过滤
       if (filterKeyword) {
         const kw = filterKeyword.toLowerCase();
         nodes = nodes.filter(n => decodeURIComponent(n).toLowerCase().includes(kw));
@@ -1042,7 +1173,7 @@ export default {
       const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
       const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
 
-      // 6. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
+      // 7. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
       if (isClientRequest) {
         let bodyText = nodes.join("\n");
         if (isB64) {
@@ -1065,12 +1196,14 @@ export default {
         return response;
       }
 
-      // 7. 浏览器访问根路径 -> 渲染 Web 控制面板
+      // 8. 浏览器访问根路径 -> 渲染 Web 控制面板
       const baseUrl = `${url.protocol}//${url.host}`;
       const queryParts = [];
       if (auth.token) queryParts.push(`token=${encodeURIComponent(auth.token)}`);
       if (data.type === "v2ray") queryParts.push("type=v2ray");
       if (requestedSource) queryParts.push(`source=${encodeURIComponent(requestedSource)}`);
+      if (firstName !== DEFAULT_FIRST_NODE_NAME) queryParts.push(`first_name=${encodeURIComponent(firstName)}`);
+      if (prefix !== DEFAULT_NODE_PREFIX) queryParts.push(`prefix=${encodeURIComponent(prefix)}`);
 
       const queryStr = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
       const b64QueryStr = queryParts.length > 0 ? `?b64=1&${queryParts.join("&")}` : "?b64=1";
@@ -1087,7 +1220,8 @@ export default {
         isToday: data.isToday,
         mode: data.mode,
         type: data.type,
-        authInfo: auth
+        authInfo: auth,
+        renameOptions: { firstName, prefix }
       });
 
       const response = new Response(html, {

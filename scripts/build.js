@@ -11,6 +11,7 @@ const formatterCode = fs.readFileSync(path.join(rootDir, "src/formatter.js"), "u
 const parserCode = fs.readFileSync(path.join(rootDir, "src/parser.js"), "utf8");
 const scraperCode = fs.readFileSync(path.join(rootDir, "src/scraper.js"), "utf8");
 const managerCode = fs.readFileSync(path.join(rootDir, "src/manager.js"), "utf8");
+const renamerCode = fs.readFileSync(path.join(rootDir, "src/renamer.js"), "utf8");
 const uiCode = fs.readFileSync(path.join(rootDir, "src/ui.js"), "utf8");
 const authCode = fs.readFileSync(path.join(rootDir, "src/auth.js"), "utf8");
 const indexCode = fs.readFileSync(path.join(rootDir, "src/index.js"), "utf8");
@@ -27,6 +28,7 @@ const cleanedFormatter = cleanModule(formatterCode);
 const cleanedParser = cleanModule(parserCode);
 const cleanedScraper = cleanModule(scraperCode);
 const cleanedManager = cleanModule(managerCode);
+const cleanedRenamer = cleanModule(renamerCode);
 const cleanedUi = cleanModule(uiCode);
 const cleanedAuth = cleanModule(authCode);
 const cleanedIndex = indexCode.replace(/^import\s+[\s\S]*?from\s+['"][^'"]+['"];?/gm, "").trim();
@@ -38,10 +40,11 @@ const bundleContent = `/**
  *
  * 核心功能：
  * 1. 每日00点后自动递增更新地址，一旦获取成功自动停止探测并锁定
- * 2. 支持手动编辑地址与自动日期模式切换
- * 3. 支持 Clash 与 V2Ray 两种源格式互相转换
- * 4. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
- * 5. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
+ * 2. 自动识别并清理 "tg频道:@freenodedaily" 等宣传信息，更换为 "HOS Daily官方维护"
+ * 3. 自动为普通节点名称增加前缀 "HOS自动化线路 "，支持环境变量与 URL 参数深度自定义
+ * 4. 支持手动编辑地址与自动日期模式切换，支持 Clash 与 V2Ray 两种源格式
+ * 5. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
+ * 6. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
  */
 
 // ==================== 1. 通用工具模块 ====================
@@ -59,13 +62,16 @@ ${cleanedScraper}
 // ==================== 5. 订阅源与状态管理模块 ====================
 ${cleanedManager}
 
-// ==================== 6. 账号密码鉴权模块 ====================
+// ==================== 6. 节点名称清洗与重命名模块 ====================
+${cleanedRenamer}
+
+// ==================== 7. 账号密码鉴权模块 ====================
 ${cleanedAuth}
 
-// ==================== 7. UI 渲染模块 ====================
+// ==================== 8. UI 渲染模块 ====================
 ${cleanedUi}
 
-// ==================== 8. Worker 主入口 ====================
+// ==================== 9. Worker 主入口 ====================
 ${cleanedIndex}
 `;
 

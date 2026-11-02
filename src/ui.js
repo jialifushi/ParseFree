@@ -1,7 +1,7 @@
 /**
  * Web 控制台页面渲染模块
  * 遵循 Element Plus 企业级风格，简洁、专业、克制
- * 支持自动日期模式 / 手动编辑地址模式切换，支持 V2Ray / Clash 源切换
+ * 支持自动日期模式 / 手动编辑地址模式切换，支持 V2Ray / Clash 源切换与节点重命名规则自定义
  */
 
 export function renderDashboardHtml({
@@ -13,13 +13,16 @@ export function renderDashboardHtml({
   isToday,
   mode,
   type,
-  authInfo = {}
+  authInfo = {},
+  renameOptions = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
   const isProtected = Boolean(authInfo.active);
   const isAutoMode = mode !== "manual";
   const isV2ray = type === "v2ray";
+  const firstName = renameOptions.firstName || "HOS Daily官方维护";
+  const prefix = renameOptions.prefix !== undefined ? renameOptions.prefix : "HOS自动化线路 ";
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -45,18 +48,13 @@ export function renderDashboardHtml({
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      background-color: var(--el-bg-color);
-      color: var(--el-text-primary);
-      line-height: 1.6;
-      padding: 24px 16px;
+      background-color: var(--el-bg-color); color: var(--el-text-primary);
+      line-height: 1.6; padding: 24px 16px;
     }
     .container { max-width: 960px; margin: 0 auto; }
     .card {
-      background: var(--card-bg);
-      border: 1px solid var(--el-border-light);
-      border-radius: 6px;
-      padding: 20px 24px;
-      margin-bottom: 20px;
+      background: var(--card-bg); border: 1px solid var(--el-border-light);
+      border-radius: 6px; padding: 20px 24px; margin-bottom: 20px;
     }
     .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-left: 4px solid var(--el-color-primary); padding-left: 10px; }
     .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 16px; }
@@ -96,7 +94,7 @@ export function renderDashboardHtml({
   <div class="container">
     <div class="card" style="margin-bottom: 16px;">
       <h1 style="font-size: 18px; font-weight: 600; margin-bottom: 6px;">ParseFree 免费节点自动同步与转换服务</h1>
-      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。支持手动编辑与格式转换。</p>
+      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。广告信息自动清理，节点名称统一规范化。</p>
     </div>
 
     <!-- 1. 运行状态卡片 -->
@@ -124,9 +122,9 @@ export function renderDashboardHtml({
       <div style="font-size: 13px; color: var(--el-text-regular); font-family: monospace; word-break: break-all; margin-top: 4px;">${targetUrl}</div>
     </div>
 
-    <!-- 2. 数据源配置与手动编辑卡片 -->
+    <!-- 2. 数据源模式设置与手动编辑卡片 -->
     <div class="card">
-      <div class="card-title">数据源模式设置与手动编辑</div>
+      <div class="card-title">数据源模式与手动编辑</div>
       <div style="margin-bottom: 14px;">
         <span style="font-size: 13px; font-weight: 600; margin-right: 12px;">运行模式：</span>
         <label class="radio-label"><input type="radio" name="workMode" value="auto" ${isAutoMode ? "checked" : ""} onchange="switchMode('auto')"> 自动日期递增模式 (每日00点后自动更新)</label>
@@ -144,16 +142,29 @@ export function renderDashboardHtml({
           <button class="btn btn-primary" onclick="applyManualUrl()">应用此地址</button>
         </div>
       </div>
-      <div id="autoTip" style="font-size: 12px; color: var(--el-text-secondary); ${!isAutoMode ? 'display: none;' : ''}">
-        💡 自动模式下，系统会在每日 00:00 自动探测当天日期地址（例如 https://free.datiya.com/uploads/20261103-clash.yaml）。一旦探测到有效数据即锁定并停止探测；若当天未发布则自动平滑回溯前一天。
-      </div>
     </div>
 
-    <!-- 3. 订阅地址获取卡片 -->
+    <!-- 3. 自定义节点命名与广告清理卡片 -->
+    <div class="card">
+      <div class="card-title">节点命名与广告清理设置</div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 12px;">
+        <div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">首节点 / 广告宣传替换名称：</div>
+          <input type="text" class="input-control" id="firstNameInput" value="${firstName}" style="width: 100%;">
+        </div>
+        <div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">普通节点线路前缀：</div>
+          <input type="text" class="input-control" id="prefixInput" value="${prefix}" style="width: 100%;">
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="applyRenameOptions()">应用节点命名规则</button>
+    </div>
+
+    <!-- 4. 订阅地址获取卡片 -->
     <div class="card">
       <div class="card-title">客户端订阅链接</div>
       <div style="margin-bottom: 12px;">
-        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. 通用明文订阅链接 (与 格式.txt 一致，支持小火箭 / v2rayN / sing-box)：</div>
+        <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. 通用明文订阅链接 (与 格式.txt 一致，导入小火箭 / v2rayN / sing-box)：</div>
         <div class="input-group">
           <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
           <button class="btn btn-primary" onclick="copyText('${subUrl}')">复制订阅链接</button>
@@ -169,7 +180,7 @@ export function renderDashboardHtml({
       <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
     </div>
 
-    <!-- 4. 节点列表卡片 -->
+    <!-- 5. 节点列表预览卡片 -->
     <div class="card">
       <div class="card-title">节点明细预览 (${nodeCount})</div>
       <div class="node-list">
@@ -199,11 +210,9 @@ export function renderDashboardHtml({
 
     function switchMode(m) {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
-      document.getElementById("autoTip").style.display = m === "auto" ? "block" : "none";
       if (m === "auto") {
         const u = new URL(window.location.href);
-        u.searchParams.delete("source");
-        u.searchParams.delete("mode");
+        u.searchParams.delete("source"); u.searchParams.delete("mode");
         window.location.href = u.toString();
       }
     }
@@ -214,9 +223,19 @@ export function renderDashboardHtml({
     }
     function applyManualUrl() {
       const val = document.getElementById("customInput").value.trim();
-      if (!val) return alert("请输入有效的节点地址");
+      if (!val) return alert("请输入有效地址");
       const u = new URL(window.location.href);
       u.searchParams.set("source", val);
+      window.location.href = u.toString();
+    }
+    function applyRenameOptions() {
+      const fn = document.getElementById("firstNameInput").value.trim();
+      const p = document.getElementById("prefixInput").value;
+      const u = new URL(window.location.href);
+      if (fn) u.searchParams.set("first_name", fn);
+      else u.searchParams.delete("first_name");
+      if (p) u.searchParams.set("prefix", p);
+      else u.searchParams.delete("prefix");
       window.location.href = u.toString();
     }
   </script>

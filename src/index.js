@@ -8,6 +8,7 @@ import { toBase64 } from "./utils.js";
 import { renderDashboardHtml } from "./ui.js";
 import { verifyAuth, buildAuthRequiredResponse } from "./auth.js";
 import { resolveSubscriptionData, handleScheduledTask } from "./manager.js";
+import { processAndRenameNodes, DEFAULT_FIRST_NODE_NAME, DEFAULT_NODE_PREFIX } from "./renamer.js";
 
 const CLIENT_UA_PATTERNS = [
   "clash", "v2ray", "shadowrocket", "quantumult",
@@ -39,6 +40,10 @@ export default {
     const filterKeyword = searchParams.get("filter") || "";
     const forceRefresh = searchParams.get("refresh") === "1" || searchParams.get("force") === "1";
 
+    // 节点自定义名称与前缀参数（支持环境变量与 URL 参数）
+    const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
+    const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
+
     // 3. 边缘缓存处理 (Cloudflare Cache API)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKey = new Request(url.toString(), request);
@@ -57,7 +62,10 @@ export default {
       });
       let nodes = parseSubscription(data.content);
 
-      // 5. 关键词过滤
+      // 5. 广告宣传信息清洗与节点自定义重命名
+      nodes = processAndRenameNodes(nodes, { firstName, prefix });
+
+      // 6. 关键词过滤
       if (filterKeyword) {
         const kw = filterKeyword.toLowerCase();
         nodes = nodes.filter(n => decodeURIComponent(n).toLowerCase().includes(kw));
@@ -67,7 +75,7 @@ export default {
       const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
       const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
 
-      // 6. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
+      // 7. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
       if (isClientRequest) {
         let bodyText = nodes.join("\n");
         if (isB64) {
@@ -90,12 +98,14 @@ export default {
         return response;
       }
 
-      // 7. 浏览器访问根路径 -> 渲染 Web 控制面板
+      // 8. 浏览器访问根路径 -> 渲染 Web 控制面板
       const baseUrl = `${url.protocol}//${url.host}`;
       const queryParts = [];
       if (auth.token) queryParts.push(`token=${encodeURIComponent(auth.token)}`);
       if (data.type === "v2ray") queryParts.push("type=v2ray");
       if (requestedSource) queryParts.push(`source=${encodeURIComponent(requestedSource)}`);
+      if (firstName !== DEFAULT_FIRST_NODE_NAME) queryParts.push(`first_name=${encodeURIComponent(firstName)}`);
+      if (prefix !== DEFAULT_NODE_PREFIX) queryParts.push(`prefix=${encodeURIComponent(prefix)}`);
 
       const queryStr = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
       const b64QueryStr = queryParts.length > 0 ? `?b64=1&${queryParts.join("&")}` : "?b64=1";
@@ -112,7 +122,8 @@ export default {
         isToday: data.isToday,
         mode: data.mode,
         type: data.type,
-        authInfo: auth
+        authInfo: auth,
+        renameOptions: { firstName, prefix }
       });
 
       const response = new Response(html, {

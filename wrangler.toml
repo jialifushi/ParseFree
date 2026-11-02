@@ -10,5 +10,7 @@ crons = ["*/15 * * * *"]
 # [vars]
 # AUTH_PASSWORD = "your_secret_password"
 # AUTH_USERNAME = "admin"
+# FIRST_NODE_NAME = "HOS Daily官方维护"
+# NODE_PREFIX = "HOS自动化线路 "
 # SOURCE_TYPE = "clash" # clash 或 v2ray
 # CUSTOM_SOURCE_URL = "" # 手动指定固定源地址
