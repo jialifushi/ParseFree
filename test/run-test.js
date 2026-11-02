@@ -25,7 +25,10 @@ async function runTests() {
   assert.strictEqual(resSub.headers.get("Cache-Control"), "no-cache, no-store, must-revalidate", "客户端响应必须下发 no-cache 防小火箭本地缓存");
   assert(resSub.headers.get("Subscription-Userinfo"), "必须下发 Subscription-Userinfo 触发小火箭托管订阅更新");
   assert.strictEqual(resSub.headers.get("Profile-Update-Interval"), "6", "必须下发 Profile-Update-Interval 自动更新周期");
-  console.log("   ✓ 小火箭托管订阅标头与缓存击穿标头验证通过");
+  assert(resSub.headers.get("X-Last-Request-Time"), "必须包含本次请求北京时间标头");
+  assert(resSub.headers.get("X-Next-Request-Time"), "必须包含下次请求北京时间标头");
+  assert(resSub.headers.get("X-Countdown-Seconds"), "必须包含倒计时秒数标头");
+  console.log("   ✓ 小火箭托管订阅标头与时间戳/倒计时标头验证通过");
 
   // 2. 验证普通节点前缀 (HOS自动化线路)
   const secondNode = lines[1];
@@ -35,8 +38,8 @@ async function runTests() {
   assert(vmessObj.ps.startsWith("HOS自动化线路 "), "普通节点名称前面必须带有 'HOS自动化线路 ' 前缀");
   console.log("   ✓ 普通节点前缀验证正常");
 
-  // 3. 测试重试间隔参数 (?retry_interval=15)
-  console.log("3. 测试失败重试间隔配置 (?retry_interval=15)...");
+  // 3. 测试重试间隔参数 (?retry_interval=15) 与时间元数据展示
+  console.log("3. 测试重试间隔配置 (?retry_interval=15) 与请求时间/实时倒计时展示...");
   const reqInterval = new Request("http://localhost:8787/?retry_interval=15", {
     headers: { "user-agent": "Mozilla/5.0" }
   });
@@ -44,7 +47,10 @@ async function runTests() {
   assert.strictEqual(resInterval.status, 200);
   const html = await resInterval.text();
   assert(html.includes('value="15"'), "页面应包含设置的 15 分钟重试间隔");
-  console.log("   ✓ 重试间隔设置与页面展示正常");
+  assert(html.includes("本次请求 (北京时间)"), "页面应包含本次请求北京时间展示");
+  assert(html.includes("下一次请求 (北京时间)"), "页面应包含下一次请求北京时间展示");
+  assert(html.includes("countdownBox"), "页面应包含倒计时元素 countdownBox");
+  console.log("   ✓ 重试间隔设置与实时倒计时/时间元数据展示正常");
 
   // 4. 测试自定义首节点与前缀参数 (?first_name=定制官方节点&prefix=线路前缀-)
   console.log("4. 测试自定义首节点参数 (附带02日后缀)...");

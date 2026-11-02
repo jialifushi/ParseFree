@@ -107,7 +107,10 @@ export default {
           "Content-Disposition": `attachment; filename="ParseFree_${data.sourceDate || 'sub'}.txt"`,
           "X-Total-Nodes": String(nodes.length),
           "X-Source-Date": encodeURIComponent(String(data.sourceDate || "unknown")),
-          "X-Source-Type": encodeURIComponent(String(data.type))
+          "X-Source-Type": encodeURIComponent(String(data.type)),
+          "X-Last-Request-Time": encodeURIComponent(data.lastRequestTimeStr || ""),
+          "X-Next-Request-Time": encodeURIComponent(data.nextRequestTimeStr || ""),
+          "X-Countdown-Seconds": String(data.countdownSeconds || 0)
         };
 
         const response = new Response(bodyText, { status: 200, headers });
@@ -149,7 +152,13 @@ export default {
         authInfo: auth,
         renameOptions: { firstName, prefix },
         retryMinutes: data.retryMinutes,
-        statusMsg: data.statusMsg
+        statusMsg: data.statusMsg,
+        timing: {
+          lastRequestTimeStr: data.lastRequestTimeStr,
+          nextRequestTimeStr: data.nextRequestTimeStr,
+          countdownSeconds: data.countdownSeconds,
+          isToday: data.isToday
+        }
       });
 
       const response = new Response(html, {

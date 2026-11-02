@@ -16,7 +16,8 @@ export function renderDashboardHtml({
   authInfo = {},
   renameOptions = {},
   retryMinutes = 10,
-  statusMsg = ""
+  statusMsg = "",
+  timing = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
@@ -25,6 +26,9 @@ export function renderDashboardHtml({
   const isV2ray = type === "v2ray";
   const firstName = renameOptions.firstName || "HOS Daily官方维护";
   const prefix = renameOptions.prefix !== undefined ? renameOptions.prefix : "HOS自动化线路 ";
+  const lastReqTime = timing.lastRequestTimeStr || "-";
+  const nextReqTime = timing.nextRequestTimeStr || "-";
+  const countdownSec = Number(timing.countdownSeconds) || 0;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -34,18 +38,10 @@ export function renderDashboardHtml({
   <title>免费节点自动同步与转换服务 - ParseFree</title>
   <style>
     :root {
-      --el-color-primary: #409eff;
-      --el-color-success: #67c23a;
-      --el-color-warning: #e6a23c;
-      --el-color-info: #909399;
-      --el-color-danger: #f56c6c;
-      --el-bg-color: #f5f7fa;
-      --el-text-primary: #303133;
-      --el-text-regular: #606266;
-      --el-text-secondary: #909399;
-      --el-border-color: #dcdfe6;
-      --el-border-light: #e4e7ed;
-      --card-bg: #ffffff;
+      --el-color-primary: #409eff; --el-color-success: #67c23a; --el-color-warning: #e6a23c;
+      --el-color-info: #909399; --el-color-danger: #f56c6c; --el-bg-color: #f5f7fa;
+      --el-text-primary: #303133; --el-text-regular: #606266; --el-text-secondary: #909399;
+      --el-border-color: #dcdfe6; --el-border-light: #e4e7ed; --card-bg: #ffffff;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -54,33 +50,21 @@ export function renderDashboardHtml({
       line-height: 1.6; padding: 24px 16px;
     }
     .container { max-width: 960px; margin: 0 auto; }
-    .card {
-      background: var(--card-bg); border: 1px solid var(--el-border-light);
-      border-radius: 6px; padding: 20px 24px; margin-bottom: 20px;
-    }
+    .card { background: var(--card-bg); border: 1px solid var(--el-border-light); border-radius: 6px; padding: 20px 24px; margin-bottom: 20px; }
     .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-left: 4px solid var(--el-color-primary); padding-left: 10px; }
     .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 16px; }
     .meta-item { background: #fafafa; border: 1px solid var(--el-border-light); padding: 12px; border-radius: 4px; }
     .meta-label { font-size: 12px; color: var(--el-text-secondary); margin-bottom: 4px; }
     .meta-value { font-size: 14px; font-weight: 600; word-break: break-all; }
     .input-group { display: flex; gap: 8px; margin-bottom: 12px; }
-    .input-control {
-      flex: 1; padding: 8px 12px; border: 1px solid var(--el-border-color);
-      border-radius: 4px; font-size: 13px; background: #fafafa; color: var(--el-text-primary);
-    }
-    .btn {
-      padding: 8px 16px; border-radius: 4px; font-size: 13px; cursor: pointer;
-      font-weight: 500; border: 1px solid transparent; transition: all 0.2s;
-    }
+    .input-control { flex: 1; padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 4px; font-size: 13px; background: #fafafa; color: var(--el-text-primary); }
+    .btn { padding: 8px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; font-weight: 500; border: 1px solid transparent; transition: all 0.2s; }
     .btn-primary { background: var(--el-color-primary); color: #fff; }
     .btn-primary:hover { background: #66b1ff; }
     .btn-default { background: #fff; border-color: var(--el-border-color); color: var(--el-text-regular); }
     .btn-default:hover { border-color: var(--el-color-primary); color: var(--el-color-primary); }
     .node-list { max-height: 360px; overflow-y: auto; border: 1px solid var(--el-border-light); border-radius: 4px; }
-    .node-item {
-      padding: 9px 12px; font-size: 12px; font-family: monospace;
-      border-bottom: 1px solid var(--el-border-light); word-break: break-all; background: #fff;
-    }
+    .node-item { padding: 9px 12px; font-size: 12px; font-family: monospace; border-bottom: 1px solid var(--el-border-light); word-break: break-all; background: #fff; }
     .node-item:nth-child(even) { background: #fafafa; }
     .tag { display: inline-block; padding: 2px 6px; font-size: 11px; border-radius: 3px; font-weight: 600; margin-right: 8px; }
     .tag-vmess { background: #ecf5ff; color: #409eff; border: 1px solid #d9ecff; }
@@ -118,6 +102,18 @@ export function renderDashboardHtml({
         <div class="meta-item">
           <div class="meta-label">安全鉴权状态</div>
           <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启密码保护" : "公开访问"}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">本次请求 (北京时间)</div>
+          <div class="meta-value" style="font-size: 13px;">${lastReqTime}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">下一次请求 (北京时间)</div>
+          <div class="meta-value" style="font-size: 13px; color: var(--el-color-primary);">${nextReqTime} ${isToday ? "(明日0点)" : "(重试探测)"}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">距离下一次请求倒计时</div>
+          <div class="meta-value" id="countdownBox" style="font-size: 14px; font-weight: 700; color: var(--el-color-primary); font-family: monospace;">计算中...</div>
         </div>
       </div>
       <div class="meta-label">当前生效的上游源地址：</div>
@@ -213,6 +209,23 @@ export function renderDashboardHtml({
 
   <script>
     const allNodes = ${escapedNodes};
+    let leftSec = ${countdownSec};
+    function updateCountdown() {
+      const el = document.getElementById("countdownBox");
+      if (!el) return;
+      if (leftSec <= 0) {
+        el.innerText = "00分00秒 (已到期可探测)";
+        return;
+      }
+      const h = Math.floor(leftSec / 3600);
+      const m = Math.floor((leftSec % 3600) / 60);
+      const s = leftSec % 60;
+      el.innerText = (h > 0 ? h + "小时" : "") + String(m).padStart(2, "0") + "分" + String(s).padStart(2, "0") + "秒";
+      leftSec--;
+    }
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
+
     function showToast(msg) {
       const t = document.getElementById("toast");
       t.innerText = msg; t.style.display = "block";

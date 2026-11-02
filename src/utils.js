@@ -44,3 +44,58 @@ export function formatDate(d) {
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}${mm}${dd}`;
 }
+
+/**
+ * 格式化时间戳为北京时间 (UTC+8) 字符串: YYYY-MM-DD HH:mm:ss
+ */
+export function formatBeijingDateTime(epochMs) {
+  if (!epochMs) return "-";
+  const bjOffsetMs = 8 * 60 * 60 * 1000;
+  const d = new Date(epochMs + bjOffsetMs);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+}
+
+/**
+ * 获取接下来一天的 00:00:00 (北京时间) 的 UTC 毫秒时间戳
+ */
+export function getNextDayMidnightEpochMs(nowMs = Date.now()) {
+  const bjOffsetMs = 8 * 60 * 60 * 1000;
+  const bjTime = new Date(nowMs + bjOffsetMs);
+  const y = bjTime.getUTCFullYear();
+  const m = bjTime.getUTCMonth();
+  const d = bjTime.getUTCDate();
+  return Date.UTC(y, m, d + 1, 0, 0, 0) - bjOffsetMs;
+}
+
+/**
+ * 计算时间元数据：上次请求时间、下次请求时间以及实时倒计时秒数
+ */
+export function computeTimingMeta({
+  isSuccess = false,
+  lastFailedTime = 0,
+  retryCooldownMs = 600000,
+  nowMs = Date.now()
+} = {}) {
+  let nextRequestTime = 0;
+  if (isSuccess) {
+    // 成功锁定今日/或手动成功：下一次请求时间固定为接下来一天的 00:00 (北京时间)
+    nextRequestTime = getNextDayMidnightEpochMs(nowMs);
+  } else if (lastFailedTime > 0) {
+    // 失败重试中：下一次请求时间为 失败时间 + 冷却时间
+    nextRequestTime = lastFailedTime + retryCooldownMs;
+  } else {
+    nextRequestTime = nowMs;
+  }
+  const countdownSeconds = Math.max(0, Math.floor((nextRequestTime - nowMs) / 1000));
+  return {
+    nextRequestTime,
+    countdownSeconds,
+    nextRequestTimeStr: formatBeijingDateTime(nextRequestTime)
+  };
+}

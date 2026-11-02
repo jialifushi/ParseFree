@@ -60,6 +60,61 @@ function formatDate(d) {
   return `${yyyy}${mm}${dd}`;
 }
 
+/**
+ * 格式化时间戳为北京时间 (UTC+8) 字符串: YYYY-MM-DD HH:mm:ss
+ */
+function formatBeijingDateTime(epochMs) {
+  if (!epochMs) return "-";
+  const bjOffsetMs = 8 * 60 * 60 * 1000;
+  const d = new Date(epochMs + bjOffsetMs);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+}
+
+/**
+ * 获取接下来一天的 00:00:00 (北京时间) 的 UTC 毫秒时间戳
+ */
+function getNextDayMidnightEpochMs(nowMs = Date.now()) {
+  const bjOffsetMs = 8 * 60 * 60 * 1000;
+  const bjTime = new Date(nowMs + bjOffsetMs);
+  const y = bjTime.getUTCFullYear();
+  const m = bjTime.getUTCMonth();
+  const d = bjTime.getUTCDate();
+  return Date.UTC(y, m, d + 1, 0, 0, 0) - bjOffsetMs;
+}
+
+/**
+ * 计算时间元数据：上次请求时间、下次请求时间以及实时倒计时秒数
+ */
+function computeTimingMeta({
+  isSuccess = false,
+  lastFailedTime = 0,
+  retryCooldownMs = 600000,
+  nowMs = Date.now()
+} = {}) {
+  let nextRequestTime = 0;
+  if (isSuccess) {
+    // 成功锁定今日/或手动成功：下一次请求时间固定为接下来一天的 00:00 (北京时间)
+    nextRequestTime = getNextDayMidnightEpochMs(nowMs);
+  } else if (lastFailedTime > 0) {
+    // 失败重试中：下一次请求时间为 失败时间 + 冷却时间
+    nextRequestTime = lastFailedTime + retryCooldownMs;
+  } else {
+    nextRequestTime = nowMs;
+  }
+  const countdownSeconds = Math.max(0, Math.floor((nextRequestTime - nowMs) / 1000));
+  return {
+    nextRequestTime,
+    countdownSeconds,
+    nextRequestTimeStr: formatBeijingDateTime(nextRequestTime)
+  };
+}
+
 // ==================== 2. 协议格式化模块 ====================
 /**
  * 代理节点协议转换格式化模块
@@ -484,8 +539,31 @@ let memoryState = {
   targetUrl: "",       // 实际使用的源地址
   content: "",         // 源订阅文本内容
   lastSuccessTime: 0,  // 最近一次成功获取的时间戳
-  lastFailedTime: 0    // 最近一次探测今日失败的时间戳
+  lastFailedTime: 0,   // 最近一次探测今日失败的时间戳
+  lastRequestTime: 0   // 最近一次请求/探测的时间戳
 };
+
+/**
+ * 封装返回数据，统一注入本次请求北京时间、下次请求时间与倒计时秒数
+ */
+function buildReturnData(result, retryCooldownMs) {
+  const nowMs = Date.now();
+  memoryState.lastRequestTime = nowMs;
+  const timing = computeTimingMeta({
+    isSuccess: Boolean(result.isToday || result.mode === "manual"),
+    lastFailedTime: memoryState.lastFailedTime,
+    retryCooldownMs,
+    nowMs
+  });
+  return {
+    ...result,
+    lastRequestTime: nowMs,
+    lastRequestTimeStr: formatBeijingDateTime(nowMs),
+    nextRequestTime: timing.nextRequestTime,
+    nextRequestTimeStr: timing.nextRequestTimeStr,
+    countdownSeconds: timing.countdownSeconds
+  };
+}
 
 /**
  * 根据日期和类型构造源地址
@@ -557,7 +635,7 @@ async function resolveSubscriptionData({
     if (!res.ok) throw new Error(`手动源获取失败 [HTTP ${res.status}]: ${manualUrl}`);
     const content = await res.text();
     const dateMatch = manualUrl.match(/(\d{8})/);
-    return {
+    return buildReturnData({
       content,
       targetUrl: manualUrl,
       sourceDate: dateMatch ? dateMatch[1] : "manual",
@@ -565,7 +643,7 @@ async function resolveSubscriptionData({
       mode: "manual",
       type,
       retryMinutes
-    };
+    }, retryCooldownMs);
   }
 
   // 2. 自动模式：基于北京时间 (UTC+8) 的日期自动递增
@@ -574,7 +652,7 @@ async function resolveSubscriptionData({
 
   // A. 今日数据已锁定：直接返回，完全停止探测
   if (!forceRefresh && memoryState.isTodayReady && memoryState.date === todayStr && memoryState.type === type && memoryState.content) {
-    return {
+    return buildReturnData({
       content: memoryState.content,
       targetUrl: memoryState.targetUrl,
       sourceDate: memoryState.date,
@@ -583,7 +661,7 @@ async function resolveSubscriptionData({
       type,
       retryMinutes,
       statusMsg: "今日数据已锁定 (停止探测)"
-    };
+    }, retryCooldownMs);
   }
 
   // B. 检查失败重试冷却期：若刚失败不久且已有可用回退数据，则暂不重复探测，直接回退返回最新数据
@@ -592,7 +670,7 @@ async function resolveSubscriptionData({
 
   if (isCoolingDown && memoryState.content) {
     const waitSeconds = Math.ceil((retryCooldownMs - timeSinceLastFail) / 1000);
-    return {
+    return buildReturnData({
       content: memoryState.content,
       targetUrl: memoryState.targetUrl,
       sourceDate: memoryState.date,
@@ -602,7 +680,7 @@ async function resolveSubscriptionData({
       retryMinutes,
       isCoolingDown: true,
       statusMsg: `今日源待发布，冷却重试中 (已回退，${waitSeconds} 秒后允许再次探测)`
-    };
+    }, retryCooldownMs);
   }
 
   // C. 发起对今日新源的探测
@@ -619,9 +697,10 @@ async function resolveSubscriptionData({
         targetUrl: todayUrl,
         content,
         lastSuccessTime: Date.now(),
-        lastFailedTime: 0
+        lastFailedTime: 0,
+        lastRequestTime: Date.now()
       };
-      return {
+      return buildReturnData({
         content,
         targetUrl: todayUrl,
         sourceDate: todayStr,
@@ -630,7 +709,7 @@ async function resolveSubscriptionData({
         type,
         retryMinutes,
         statusMsg: "今日数据已成功获取并锁定"
-      };
+      }, retryCooldownMs);
     }
   }
 
@@ -639,7 +718,7 @@ async function resolveSubscriptionData({
 
   // 若已有历史有效数据，立即自动回退返回
   if (memoryState.content && memoryState.type === type) {
-    return {
+    return buildReturnData({
       content: memoryState.content,
       targetUrl: memoryState.targetUrl,
       sourceDate: memoryState.date,
@@ -648,7 +727,7 @@ async function resolveSubscriptionData({
       type,
       retryMinutes,
       statusMsg: `今日数据尚未上传，已自动回退使用 ${memoryState.date} 数据`
-    };
+    }, retryCooldownMs);
   }
 
   // E. 内存无数据时，向前回退探测前 1~3 天有效数据兜底
@@ -667,9 +746,10 @@ async function resolveSubscriptionData({
           targetUrl: pastUrl,
           content,
           lastSuccessTime: Date.now(),
-          lastFailedTime: Date.now()
+          lastFailedTime: Date.now(),
+          lastRequestTime: Date.now()
         };
-        return {
+        return buildReturnData({
           content,
           targetUrl: pastUrl,
           sourceDate: pastDateStr,
@@ -678,7 +758,7 @@ async function resolveSubscriptionData({
           type,
           retryMinutes,
           statusMsg: `已自动回退使用 ${pastDateStr} 最新有效数据`
-        };
+        }, retryCooldownMs);
       }
     }
   }
@@ -972,7 +1052,8 @@ function renderDashboardHtml({
   authInfo = {},
   renameOptions = {},
   retryMinutes = 10,
-  statusMsg = ""
+  statusMsg = "",
+  timing = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
@@ -981,6 +1062,9 @@ function renderDashboardHtml({
   const isV2ray = type === "v2ray";
   const firstName = renameOptions.firstName || "HOS Daily官方维护";
   const prefix = renameOptions.prefix !== undefined ? renameOptions.prefix : "HOS自动化线路 ";
+  const lastReqTime = timing.lastRequestTimeStr || "-";
+  const nextReqTime = timing.nextRequestTimeStr || "-";
+  const countdownSec = Number(timing.countdownSeconds) || 0;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -990,18 +1074,10 @@ function renderDashboardHtml({
   <title>免费节点自动同步与转换服务 - ParseFree</title>
   <style>
     :root {
-      --el-color-primary: #409eff;
-      --el-color-success: #67c23a;
-      --el-color-warning: #e6a23c;
-      --el-color-info: #909399;
-      --el-color-danger: #f56c6c;
-      --el-bg-color: #f5f7fa;
-      --el-text-primary: #303133;
-      --el-text-regular: #606266;
-      --el-text-secondary: #909399;
-      --el-border-color: #dcdfe6;
-      --el-border-light: #e4e7ed;
-      --card-bg: #ffffff;
+      --el-color-primary: #409eff; --el-color-success: #67c23a; --el-color-warning: #e6a23c;
+      --el-color-info: #909399; --el-color-danger: #f56c6c; --el-bg-color: #f5f7fa;
+      --el-text-primary: #303133; --el-text-regular: #606266; --el-text-secondary: #909399;
+      --el-border-color: #dcdfe6; --el-border-light: #e4e7ed; --card-bg: #ffffff;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -1010,33 +1086,21 @@ function renderDashboardHtml({
       line-height: 1.6; padding: 24px 16px;
     }
     .container { max-width: 960px; margin: 0 auto; }
-    .card {
-      background: var(--card-bg); border: 1px solid var(--el-border-light);
-      border-radius: 6px; padding: 20px 24px; margin-bottom: 20px;
-    }
+    .card { background: var(--card-bg); border: 1px solid var(--el-border-light); border-radius: 6px; padding: 20px 24px; margin-bottom: 20px; }
     .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-left: 4px solid var(--el-color-primary); padding-left: 10px; }
     .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 16px; }
     .meta-item { background: #fafafa; border: 1px solid var(--el-border-light); padding: 12px; border-radius: 4px; }
     .meta-label { font-size: 12px; color: var(--el-text-secondary); margin-bottom: 4px; }
     .meta-value { font-size: 14px; font-weight: 600; word-break: break-all; }
     .input-group { display: flex; gap: 8px; margin-bottom: 12px; }
-    .input-control {
-      flex: 1; padding: 8px 12px; border: 1px solid var(--el-border-color);
-      border-radius: 4px; font-size: 13px; background: #fafafa; color: var(--el-text-primary);
-    }
-    .btn {
-      padding: 8px 16px; border-radius: 4px; font-size: 13px; cursor: pointer;
-      font-weight: 500; border: 1px solid transparent; transition: all 0.2s;
-    }
+    .input-control { flex: 1; padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 4px; font-size: 13px; background: #fafafa; color: var(--el-text-primary); }
+    .btn { padding: 8px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; font-weight: 500; border: 1px solid transparent; transition: all 0.2s; }
     .btn-primary { background: var(--el-color-primary); color: #fff; }
     .btn-primary:hover { background: #66b1ff; }
     .btn-default { background: #fff; border-color: var(--el-border-color); color: var(--el-text-regular); }
     .btn-default:hover { border-color: var(--el-color-primary); color: var(--el-color-primary); }
     .node-list { max-height: 360px; overflow-y: auto; border: 1px solid var(--el-border-light); border-radius: 4px; }
-    .node-item {
-      padding: 9px 12px; font-size: 12px; font-family: monospace;
-      border-bottom: 1px solid var(--el-border-light); word-break: break-all; background: #fff;
-    }
+    .node-item { padding: 9px 12px; font-size: 12px; font-family: monospace; border-bottom: 1px solid var(--el-border-light); word-break: break-all; background: #fff; }
     .node-item:nth-child(even) { background: #fafafa; }
     .tag { display: inline-block; padding: 2px 6px; font-size: 11px; border-radius: 3px; font-weight: 600; margin-right: 8px; }
     .tag-vmess { background: #ecf5ff; color: #409eff; border: 1px solid #d9ecff; }
@@ -1074,6 +1138,18 @@ function renderDashboardHtml({
         <div class="meta-item">
           <div class="meta-label">安全鉴权状态</div>
           <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启密码保护" : "公开访问"}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">本次请求 (北京时间)</div>
+          <div class="meta-value" style="font-size: 13px;">${lastReqTime}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">下一次请求 (北京时间)</div>
+          <div class="meta-value" style="font-size: 13px; color: var(--el-color-primary);">${nextReqTime} ${isToday ? "(明日0点)" : "(重试探测)"}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">距离下一次请求倒计时</div>
+          <div class="meta-value" id="countdownBox" style="font-size: 14px; font-weight: 700; color: var(--el-color-primary); font-family: monospace;">计算中...</div>
         </div>
       </div>
       <div class="meta-label">当前生效的上游源地址：</div>
@@ -1169,6 +1245,23 @@ function renderDashboardHtml({
 
   <script>
     const allNodes = ${escapedNodes};
+    let leftSec = ${countdownSec};
+    function updateCountdown() {
+      const el = document.getElementById("countdownBox");
+      if (!el) return;
+      if (leftSec <= 0) {
+        el.innerText = "00分00秒 (已到期可探测)";
+        return;
+      }
+      const h = Math.floor(leftSec / 3600);
+      const m = Math.floor((leftSec % 3600) / 60);
+      const s = leftSec % 60;
+      el.innerText = (h > 0 ? h + "小时" : "") + String(m).padStart(2, "0") + "分" + String(s).padStart(2, "0") + "秒";
+      leftSec--;
+    }
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
+
     function showToast(msg) {
       const t = document.getElementById("toast");
       t.innerText = msg; t.style.display = "block";
@@ -1335,7 +1428,10 @@ export default {
           "Content-Disposition": `attachment; filename="ParseFree_${data.sourceDate || 'sub'}.txt"`,
           "X-Total-Nodes": String(nodes.length),
           "X-Source-Date": encodeURIComponent(String(data.sourceDate || "unknown")),
-          "X-Source-Type": encodeURIComponent(String(data.type))
+          "X-Source-Type": encodeURIComponent(String(data.type)),
+          "X-Last-Request-Time": encodeURIComponent(data.lastRequestTimeStr || ""),
+          "X-Next-Request-Time": encodeURIComponent(data.nextRequestTimeStr || ""),
+          "X-Countdown-Seconds": String(data.countdownSeconds || 0)
         };
 
         const response = new Response(bodyText, { status: 200, headers });
@@ -1377,7 +1473,13 @@ export default {
         authInfo: auth,
         renameOptions: { firstName, prefix },
         retryMinutes: data.retryMinutes,
-        statusMsg: data.statusMsg
+        statusMsg: data.statusMsg,
+        timing: {
+          lastRequestTimeStr: data.lastRequestTimeStr,
+          nextRequestTimeStr: data.nextRequestTimeStr,
+          countdownSeconds: data.countdownSeconds,
+          isToday: data.isToday
+        }
       });
 
       const response = new Response(html, {
