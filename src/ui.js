@@ -9,10 +9,12 @@ export function renderDashboardHtml({
   nodes,
   targetUrl,
   sourceDate,
-  method
+  method,
+  authInfo = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
+  const isProtected = Boolean(authInfo.active);
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -156,6 +158,10 @@ export function renderDashboardHtml({
         <div class="meta-item">
           <div class="meta-label">获取机制</div>
           <div class="meta-value">${method === "article_discovery" ? "文章智能抓取" : (method === "date_probe" ? "日期轮询探测" : "自定义源")}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">访问鉴权保护</div>
+          <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启 (密码保护)" : "未开启 (公开访问)"}</div>
         </div>
       </div>
       <div class="meta-label">当前解析上游源地址：</div>

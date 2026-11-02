@@ -1,35 +1,13 @@
 /**
- * 节点解析与格式转换模块
- * 将 Clash YAML 配置及各类代理协议转换为通用节点链接（格式.txt 结构）
+ * 节点配置与订阅文本解析模块
+ * 提供轻量无外部依赖的 Clash Flow/Block YAML 解析及通用订阅识别
  */
 
-/**
- * 基础 Base64 编码解码助手（兼容 Node.js 与 Web Worker）
- */
-export function toBase64(str) {
-  if (typeof btoa === "function") {
-    try {
-      return btoa(unescape(encodeURIComponent(str)));
-    } catch (e) {
-      return btoa(str);
-    }
-  }
-  return Buffer.from(str, "utf-8").toString("base64");
-}
-
-export function fromBase64(str) {
-  if (typeof atob === "function") {
-    try {
-      return decodeURIComponent(escape(atob(str)));
-    } catch (e) {
-      return atob(str);
-    }
-  }
-  return Buffer.from(str, "base64").toString("utf-8");
-}
+import { proxyToUri } from "./formatter.js";
+import { fromBase64 } from "./utils.js";
 
 /**
- * 解析 Flow 风格键值对（例如 {name: xxx, port: 443, ...}）
+ * 解析 Flow 风格紧凑键值对（例如 {name: xxx, port: 443, ...}）
  */
 function parseFlow(s) {
   s = s.trim();
@@ -200,86 +178,7 @@ export function parseYamlProxies(yamlText) {
 }
 
 /**
- * 将单个 Proxy 节点对象转换为标准通用节点链接
- */
-export function proxyToUri(p) {
-  if (!p || !p.type) return null;
-  const type = String(p.type).toLowerCase();
-  const name = p.name || `${p.server}:${p.port}`;
-  const encodedName = encodeURIComponent(name);
-
-  // 1. VMess 协议 (V2RayN 标准 JSON 格式)
-  if (type === "vmess") {
-    const vmessObj = {
-      v: "2",
-      ps: name,
-      add: String(p.server || ""),
-      port: String(p.port || 443),
-      id: String(p.uuid || ""),
-      aid: String(p.alterId !== undefined ? p.alterId : 0),
-      scy: p.cipher || "auto",
-      net: p.network || "tcp",
-      type: "none",
-      host: p["ws-opts"]?.headers?.Host || p["ws-headers"]?.Host || p.servername || "",
-      path: p["ws-opts"]?.path || p["ws-path"] || "",
-      tls: p.tls ? "tls" : "",
-      sni: p.servername || p["ws-opts"]?.headers?.Host || "",
-      alpn: Array.isArray(p.alpn) ? p.alpn.join(",") : (p.alpn || "")
-    };
-    if (p["skip-cert-verify"]) vmessObj.verify_cert = false;
-    return "vmess://" + toBase64(JSON.stringify(vmessObj));
-  }
-
-  // 2. Shadowsocks 协议 (SIP002 标准)
-  if (type === "ss") {
-    const userinfo = toBase64(`${p.cipher}:${p.password}`);
-    return `ss://${userinfo}@${p.server}:${p.port}#${encodedName}`;
-  }
-
-  // 3. AnyTLS 协议
-  if (type === "anytls") {
-    const sec = p.tls ? "tls" : "none";
-    const sni = p.servername || p.sni || "";
-    const alpn = encodeURIComponent(Array.isArray(p.alpn) ? p.alpn[0] : (p.alpn || "http/1.1"));
-    const insecure = p["skip-cert-verify"] ? "1" : "0";
-    const fp = p["client-fingerprint"] || "chrome";
-    return `anytls://${p.password || p.uuid}@${p.server}:${p.port}?security=${sec}&sni=${encodeURIComponent(sni)}&alpn=${alpn}&insecure=${insecure}&fp=${fp}#${encodedName}`;
-  }
-
-  // 4. Trojan 协议
-  if (type === "trojan") {
-    const sni = p.sni || p.servername || p.server;
-    return `trojan://${encodeURIComponent(p.password)}@${p.server}:${p.port}?security=tls&sni=${encodeURIComponent(sni)}#${encodedName}`;
-  }
-
-  // 5. VLESS 协议
-  if (type === "vless") {
-    const sec = p.tls ? (p.realityOpts ? "reality" : "tls") : "none";
-    const net = p.network || "tcp";
-    const sni = p.servername || p.sni || "";
-    const path = p["ws-opts"]?.path || "";
-    return `vless://${p.uuid}@${p.server}:${p.port}?encryption=none&security=${sec}&type=${net}&sni=${encodeURIComponent(sni)}&path=${encodeURIComponent(path)}#${encodedName}`;
-  }
-
-  // 6. Hysteria 2 协议
-  if (type === "hysteria2" || type === "hy2") {
-    const sni = p.sni || p.servername || "";
-    const insecure = p["skip-cert-verify"] ? "1" : "0";
-    return `hysteria2://${encodeURIComponent(p.password)}@${p.server}:${p.port}?sni=${encodeURIComponent(sni)}&insecure=${insecure}#${encodedName}`;
-  }
-
-  // 7. TUIC 协议
-  if (type === "tuic") {
-    const sni = p.sni || p.servername || "";
-    const alpn = encodeURIComponent(Array.isArray(p.alpn) ? p.alpn.join(",") : (p.alpn || ""));
-    return `tuic://${p.uuid}:${encodeURIComponent(p.password)}@${p.server}:${p.port}?sni=${encodeURIComponent(sni)}&alpn=${alpn}#${encodedName}`;
-  }
-
-  return null;
-}
-
-/**
- * 智能解析源数据（支持 Clash YAML、Base64 订阅、纯文本链接列表）
+ * 智能解析订阅数据（支持 Clash YAML、Base64 订阅、纯文本链接列表）
  */
 export function parseSubscription(rawContent) {
   if (!rawContent || typeof rawContent !== "string") return [];

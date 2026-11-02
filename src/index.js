@@ -3,9 +3,11 @@
  * 路由分发、Cache API 缓存控制与结果输出
  */
 
-import { parseSubscription, toBase64 } from "./parser.js";
+import { parseSubscription } from "./parser.js";
+import { toBase64 } from "./utils.js";
 import { fetchSubscriptionData } from "./scraper.js";
 import { renderDashboardHtml } from "./ui.js";
+import { verifyAuth, buildAuthRequiredResponse } from "./auth.js";
 
 // 常见代理客户端 User-Agent 标识
 const CLIENT_UA_PATTERNS = [
@@ -23,7 +25,13 @@ export default {
     const url = new URL(request.url);
     const { pathname, searchParams } = url;
 
-    // 1. 提取请求参数
+    // 1. 访问鉴权校验（环境变量配置 AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN）
+    const auth = verifyAuth(request, env);
+    if (!auth.authenticated) {
+      return buildAuthRequiredResponse();
+    }
+
+    // 2. 提取请求参数
     const customSource = searchParams.get("source") || searchParams.get("url");
     const format = (searchParams.get("format") || "").toLowerCase();
     const isB64 = searchParams.get("b64") === "1" || searchParams.get("b64") === "true" || format === "base64" || format === "b64";
@@ -79,8 +87,9 @@ export default {
 
       // 6. 浏览器访问根路径 -> 渲染可视化 Web 控制台
       const baseUrl = `${url.protocol}//${url.host}`;
-      const subUrl = `${baseUrl}/sub`;
-      const b64SubUrl = `${baseUrl}/sub?b64=1`;
+      const tokenParam = auth.token ? `token=${encodeURIComponent(auth.token)}` : "";
+      const subUrl = tokenParam ? `${baseUrl}/sub?${tokenParam}` : `${baseUrl}/sub`;
+      const b64SubUrl = tokenParam ? `${baseUrl}/sub?b64=1&${tokenParam}` : `${baseUrl}/sub?b64=1`;
 
       const html = renderDashboardHtml({
         subUrl,
@@ -88,7 +97,8 @@ export default {
         nodes,
         targetUrl,
         sourceDate: meta.sourceDate,
-        method: meta.method
+        method: meta.method,
+        authInfo: auth
       });
 
       const response = new Response(html, {

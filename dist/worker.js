@@ -1,251 +1,22 @@
 /**
- * ParseFree - Cloudflare Worker 单文件独立运行版本
+ * ParseFree - Cloudflare Worker / Pages 单文件独立运行版本
  * 适合直接复制全文粘贴到 Cloudflare Dashboard 在线代码编辑器中一键保存并部署
+ * 或作为 Pages _worker.js 自动运行
  *
  * 核心功能：
  * 1. 每日自动抓取免费节点站点（free.datiya.com 等）最新的 Clash 配置
  * 2. 智能容错回退机制（今日未更新自动探测前 1~3 天可用数据）
  * 3. 实时将 Clash YAML 节点转为标准节点 URI（与 格式.txt 结构一致）
- * 4. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
+ * 4. 支持账号密码访问保护（AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN 环境变量）
+ * 5. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
  */
 
-// ==================== 1. UI 渲染模块 ====================
+// ==================== 1. 通用工具模块 ====================
 /**
- * Web 控制台页面渲染模块
- * 遵循 Element Plus 企业级风格，简洁、专业、克制
+ * 通用工具与 Base64 编解码助手
+ * 兼容 Node.js 与 Cloudflare Worker 运行环境
  */
 
-function renderDashboardHtml({
-  subUrl,
-  b64SubUrl,
-  nodes,
-  targetUrl,
-  sourceDate,
-  method
-}) {
-  const nodeCount = nodes.length;
-  const escapedNodes = JSON.stringify(nodes);
-
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>免费节点订阅解析转换服务</title>
-  <style>
-    :root {
-      --el-color-primary: #409eff;
-      --el-color-success: #67c23a;
-      --el-color-warning: #e6a23c;
-      --el-color-info: #909399;
-      --el-color-danger: #f56c6c;
-      --el-bg-color: #f5f7fa;
-      --el-text-color-primary: #303133;
-      --el-text-color-regular: #606266;
-      --el-text-color-secondary: #909399;
-      --el-border-color: #dcdfe6;
-      --el-border-color-light: #e4e7ed;
-      --card-bg: #ffffff;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      background-color: var(--el-bg-color);
-      color: var(--el-text-color-primary);
-      line-height: 1.6;
-      padding: 24px;
-    }
-    .container { max-width: 960px; margin: 0 auto; }
-    .header {
-      background: var(--card-bg);
-      border: 1px solid var(--el-border-color-light);
-      border-radius: 6px;
-      padding: 20px 24px;
-      margin-bottom: 20px;
-    }
-    .header h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; color: var(--el-text-color-primary); }
-    .header p { font-size: 14px; color: var(--el-text-color-regular); }
-    
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--el-border-color-light);
-      border-radius: 6px;
-      padding: 20px 24px;
-      margin-bottom: 20px;
-    }
-    .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-left: 4px solid var(--el-color-primary); padding-left: 10px; }
-    
-    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
-    .meta-item { background: #fafafa; border: 1px solid var(--el-border-color-light); padding: 12px; border-radius: 4px; }
-    .meta-label { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 4px; }
-    .meta-value { font-size: 15px; font-weight: 600; color: var(--el-text-color-primary); word-break: break-all; }
-    
-    .sub-box { margin-bottom: 16px; }
-    .sub-label { font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--el-text-color-regular); }
-    .input-group { display: flex; gap: 8px; }
-    .input-control {
-      flex: 1;
-      padding: 9px 12px;
-      border: 1px solid var(--el-border-color);
-      border-radius: 4px;
-      font-size: 13px;
-      background: #fafafa;
-      color: var(--el-text-color-primary);
-    }
-    .btn {
-      padding: 9px 16px;
-      border-radius: 4px;
-      font-size: 13px;
-      cursor: pointer;
-      font-weight: 500;
-      border: 1px solid transparent;
-      white-space: nowrap;
-      transition: all 0.2s;
-    }
-    .btn-primary { background: var(--el-color-primary); color: #fff; }
-    .btn-primary:hover { background: #66b1ff; }
-    .btn-default { background: #fff; border-color: var(--el-border-color); color: var(--el-text-color-regular); }
-    .btn-default:hover { border-color: var(--el-color-primary); color: var(--el-color-primary); }
-    
-    .node-list { max-height: 400px; overflow-y: auto; border: 1px solid var(--el-border-color-light); border-radius: 4px; }
-    .node-item {
-      padding: 10px 14px;
-      font-size: 13px;
-      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      border-bottom: 1px solid var(--el-border-color-light);
-      word-break: break-all;
-      background: #fff;
-    }
-    .node-item:nth-child(even) { background: #fafafa; }
-    .node-item:last-child { border-bottom: none; }
-    .tag {
-      display: inline-block;
-      padding: 2px 6px;
-      font-size: 11px;
-      border-radius: 3px;
-      font-weight: 600;
-      margin-right: 8px;
-    }
-    .tag-vmess { background: #ecf5ff; color: #409eff; border: 1px solid #d9ecff; }
-    .tag-ss { background: #f0f9eb; color: #67c23a; border: 1px solid #e1f3d8; }
-    .tag-anytls { background: #fdf6ec; color: #e6a23c; border: 1px solid #faecd8; }
-    .tag-other { background: #f4f4f5; color: #909399; border: 1px solid #e9e9eb; }
-    
-    .toast {
-      position: fixed;
-      top: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0, 0, 0, 0.75);
-      color: #fff;
-      padding: 8px 16px;
-      border-radius: 4px;
-      font-size: 14px;
-      display: none;
-      z-index: 9999;
-    }
-  </style>
-</head>
-<body>
-  <div class="toast" id="toast">复制成功</div>
-  <div class="container">
-    <div class="header">
-      <h1>免费节点自动同步与格式转换服务</h1>
-      <p>自动抓取每日更新的节点订阅，实时转换为标准节点链接格式（与 格式.txt 结构一致）。</p>
-    </div>
-
-    <div class="card">
-      <div class="card-title">节点状态概览</div>
-      <div class="meta-grid">
-        <div class="meta-item">
-          <div class="meta-label">已解析可用节点数</div>
-          <div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">数据源发布日期</div>
-          <div class="meta-value">${sourceDate || "最新"}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">获取机制</div>
-          <div class="meta-value">${method === "article_discovery" ? "文章智能抓取" : (method === "date_probe" ? "日期轮询探测" : "自定义源")}</div>
-        </div>
-      </div>
-      <div class="meta-label">当前解析上游源地址：</div>
-      <div style="font-size: 13px; color: var(--el-text-color-regular); font-family: monospace; word-break: break-all;">${targetUrl}</div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">订阅地址获取</div>
-      <div class="sub-box">
-        <div class="sub-label">1. 通用明文订阅链接（每行一个节点，推荐导入 Shadowrocket / v2rayN / sing-box / NekoBox）：</div>
-        <div class="input-group">
-          <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
-          <button class="btn btn-primary" onclick="copyText('${subUrl}')">复制订阅链接</button>
-        </div>
-      </div>
-      <div class="sub-box">
-        <div class="sub-label">2. Base64 编码订阅链接（适用于仅支持 base64 订阅的客户端）：</div>
-        <div class="input-group">
-          <input type="text" class="input-control" readonly id="b64SubInput" value="${b64SubUrl}">
-          <button class="btn btn-default" onclick="copyText('${b64SubUrl}')">复制 Base64 链接</button>
-        </div>
-      </div>
-      <div style="margin-top: 16px;">
-        <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部节点链接</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">节点链接明细 (${nodeCount})</div>
-      <div class="node-list">
-        ${nodes.map((n) => {
-          const proto = n.split("://")[0] || "node";
-          let tagClass = "tag-other";
-          if (proto === "vmess") tagClass = "tag-vmess";
-          else if (proto === "ss") tagClass = "tag-ss";
-          else if (proto === "anytls") tagClass = "tag-anytls";
-          return `<div class="node-item"><span class="tag ${tagClass}">${proto.toUpperCase()}</span>${n}</div>`;
-        }).join("")}
-      </div>
-    </div>
-  </div>
-
-  <script>
-    const allNodes = ${escapedNodes};
-
-    function showToast(msg) {
-      const t = document.getElementById("toast");
-      t.innerText = msg;
-      t.style.display = "block";
-      setTimeout(() => { t.style.display = "none"; }, 2000);
-    }
-
-    function copyText(val) {
-      navigator.clipboard.writeText(val).then(() => {
-        showToast("已复制到剪贴板");
-      }).catch(() => {
-        prompt("请手动复制：", val);
-      });
-    }
-
-    function copyAllNodes() {
-      const text = allNodes.join("\\n");
-      copyText(text);
-    }
-  </script>
-</body>
-</html>`;
-}
-
-// ==================== 2. 节点解析与转换模块 ====================
-/**
- * 节点解析与格式转换模块
- * 将 Clash YAML 配置及各类代理协议转换为通用节点链接（格式.txt 结构）
- */
-
-/**
- * 基础 Base64 编码解码助手（兼容 Node.js 与 Web Worker）
- */
 function toBase64(str) {
   if (typeof btoa === "function") {
     try {
@@ -268,8 +39,104 @@ function fromBase64(str) {
   return Buffer.from(str, "base64").toString("utf-8");
 }
 
+// ==================== 2. 协议格式化模块 ====================
 /**
- * 解析 Flow 风格键值对（例如 {name: xxx, port: 443, ...}）
+ * 代理节点协议转换格式化模块
+ * 将各协议的代理配置对象转换为标准通用节点分享链接（格式.txt 结构）
+ */
+
+
+
+/**
+ * 将单个 Proxy 节点对象转换为标准通用节点链接
+ */
+function proxyToUri(p) {
+  if (!p || !p.type) return null;
+  const type = String(p.type).toLowerCase();
+  const name = p.name || `${p.server}:${p.port}`;
+  const encodedName = encodeURIComponent(name);
+
+  // 1. VMess 协议 (V2RayN 标准 JSON 格式)
+  if (type === "vmess") {
+    const vmessObj = {
+      v: "2",
+      ps: name,
+      add: String(p.server || ""),
+      port: String(p.port || 443),
+      id: String(p.uuid || ""),
+      aid: String(p.alterId !== undefined ? p.alterId : 0),
+      scy: p.cipher || "auto",
+      net: p.network || "tcp",
+      type: "none",
+      host: p["ws-opts"]?.headers?.Host || p["ws-headers"]?.Host || p.servername || "",
+      path: p["ws-opts"]?.path || p["ws-path"] || "",
+      tls: p.tls ? "tls" : "",
+      sni: p.servername || p["ws-opts"]?.headers?.Host || "",
+      alpn: Array.isArray(p.alpn) ? p.alpn.join(",") : (p.alpn || "")
+    };
+    if (p["skip-cert-verify"]) vmessObj.verify_cert = false;
+    return "vmess://" + toBase64(JSON.stringify(vmessObj));
+  }
+
+  // 2. Shadowsocks 协议 (SIP002 标准)
+  if (type === "ss") {
+    const userinfo = toBase64(`${p.cipher}:${p.password}`);
+    return `ss://${userinfo}@${p.server}:${p.port}#${encodedName}`;
+  }
+
+  // 3. AnyTLS 协议
+  if (type === "anytls") {
+    const sec = p.tls ? "tls" : "none";
+    const sni = p.servername || p.sni || "";
+    const alpn = encodeURIComponent(Array.isArray(p.alpn) ? p.alpn[0] : (p.alpn || "http/1.1"));
+    const insecure = p["skip-cert-verify"] ? "1" : "0";
+    const fp = p["client-fingerprint"] || "chrome";
+    return `anytls://${p.password || p.uuid}@${p.server}:${p.port}?security=${sec}&sni=${encodeURIComponent(sni)}&alpn=${alpn}&insecure=${insecure}&fp=${fp}#${encodedName}`;
+  }
+
+  // 4. Trojan 协议
+  if (type === "trojan") {
+    const sni = p.sni || p.servername || p.server;
+    return `trojan://${encodeURIComponent(p.password)}@${p.server}:${p.port}?security=tls&sni=${encodeURIComponent(sni)}#${encodedName}`;
+  }
+
+  // 5. VLESS 协议
+  if (type === "vless") {
+    const sec = p.tls ? (p.realityOpts ? "reality" : "tls") : "none";
+    const net = p.network || "tcp";
+    const sni = p.servername || p.sni || "";
+    const path = p["ws-opts"]?.path || "";
+    return `vless://${p.uuid}@${p.server}:${p.port}?encryption=none&security=${sec}&type=${net}&sni=${encodeURIComponent(sni)}&path=${encodeURIComponent(path)}#${encodedName}`;
+  }
+
+  // 6. Hysteria 2 协议
+  if (type === "hysteria2" || type === "hy2") {
+    const sni = p.sni || p.servername || "";
+    const insecure = p["skip-cert-verify"] ? "1" : "0";
+    return `hysteria2://${encodeURIComponent(p.password)}@${p.server}:${p.port}?sni=${encodeURIComponent(sni)}&insecure=${insecure}#${encodedName}`;
+  }
+
+  // 7. TUIC 协议
+  if (type === "tuic") {
+    const sni = p.sni || p.servername || "";
+    const alpn = encodeURIComponent(Array.isArray(p.alpn) ? p.alpn.join(",") : (p.alpn || ""));
+    return `tuic://${p.uuid}:${encodeURIComponent(p.password)}@${p.server}:${p.port}?sni=${encodeURIComponent(sni)}&alpn=${alpn}#${encodedName}`;
+  }
+
+  return null;
+}
+
+// ==================== 3. 节点解析模块 ====================
+/**
+ * 节点配置与订阅文本解析模块
+ * 提供轻量无外部依赖的 Clash Flow/Block YAML 解析及通用订阅识别
+ */
+
+
+
+
+/**
+ * 解析 Flow 风格紧凑键值对（例如 {name: xxx, port: 443, ...}）
  */
 function parseFlow(s) {
   s = s.trim();
@@ -440,86 +307,7 @@ function parseYamlProxies(yamlText) {
 }
 
 /**
- * 将单个 Proxy 节点对象转换为标准通用节点链接
- */
-function proxyToUri(p) {
-  if (!p || !p.type) return null;
-  const type = String(p.type).toLowerCase();
-  const name = p.name || `${p.server}:${p.port}`;
-  const encodedName = encodeURIComponent(name);
-
-  // 1. VMess 协议 (V2RayN 标准 JSON 格式)
-  if (type === "vmess") {
-    const vmessObj = {
-      v: "2",
-      ps: name,
-      add: String(p.server || ""),
-      port: String(p.port || 443),
-      id: String(p.uuid || ""),
-      aid: String(p.alterId !== undefined ? p.alterId : 0),
-      scy: p.cipher || "auto",
-      net: p.network || "tcp",
-      type: "none",
-      host: p["ws-opts"]?.headers?.Host || p["ws-headers"]?.Host || p.servername || "",
-      path: p["ws-opts"]?.path || p["ws-path"] || "",
-      tls: p.tls ? "tls" : "",
-      sni: p.servername || p["ws-opts"]?.headers?.Host || "",
-      alpn: Array.isArray(p.alpn) ? p.alpn.join(",") : (p.alpn || "")
-    };
-    if (p["skip-cert-verify"]) vmessObj.verify_cert = false;
-    return "vmess://" + toBase64(JSON.stringify(vmessObj));
-  }
-
-  // 2. Shadowsocks 协议 (SIP002 标准)
-  if (type === "ss") {
-    const userinfo = toBase64(`${p.cipher}:${p.password}`);
-    return `ss://${userinfo}@${p.server}:${p.port}#${encodedName}`;
-  }
-
-  // 3. AnyTLS 协议
-  if (type === "anytls") {
-    const sec = p.tls ? "tls" : "none";
-    const sni = p.servername || p.sni || "";
-    const alpn = encodeURIComponent(Array.isArray(p.alpn) ? p.alpn[0] : (p.alpn || "http/1.1"));
-    const insecure = p["skip-cert-verify"] ? "1" : "0";
-    const fp = p["client-fingerprint"] || "chrome";
-    return `anytls://${p.password || p.uuid}@${p.server}:${p.port}?security=${sec}&sni=${encodeURIComponent(sni)}&alpn=${alpn}&insecure=${insecure}&fp=${fp}#${encodedName}`;
-  }
-
-  // 4. Trojan 协议
-  if (type === "trojan") {
-    const sni = p.sni || p.servername || p.server;
-    return `trojan://${encodeURIComponent(p.password)}@${p.server}:${p.port}?security=tls&sni=${encodeURIComponent(sni)}#${encodedName}`;
-  }
-
-  // 5. VLESS 协议
-  if (type === "vless") {
-    const sec = p.tls ? (p.realityOpts ? "reality" : "tls") : "none";
-    const net = p.network || "tcp";
-    const sni = p.servername || p.sni || "";
-    const path = p["ws-opts"]?.path || "";
-    return `vless://${p.uuid}@${p.server}:${p.port}?encryption=none&security=${sec}&type=${net}&sni=${encodeURIComponent(sni)}&path=${encodeURIComponent(path)}#${encodedName}`;
-  }
-
-  // 6. Hysteria 2 协议
-  if (type === "hysteria2" || type === "hy2") {
-    const sni = p.sni || p.servername || "";
-    const insecure = p["skip-cert-verify"] ? "1" : "0";
-    return `hysteria2://${encodeURIComponent(p.password)}@${p.server}:${p.port}?sni=${encodeURIComponent(sni)}&insecure=${insecure}#${encodedName}`;
-  }
-
-  // 7. TUIC 协议
-  if (type === "tuic") {
-    const sni = p.sni || p.servername || "";
-    const alpn = encodeURIComponent(Array.isArray(p.alpn) ? p.alpn.join(",") : (p.alpn || ""));
-    return `tuic://${p.uuid}:${encodeURIComponent(p.password)}@${p.server}:${p.port}?sni=${encodeURIComponent(sni)}&alpn=${alpn}#${encodedName}`;
-  }
-
-  return null;
-}
-
-/**
- * 智能解析源数据（支持 Clash YAML、Base64 订阅、纯文本链接列表）
+ * 智能解析订阅数据（支持 Clash YAML、Base64 订阅、纯文本链接列表）
  */
 function parseSubscription(rawContent) {
   if (!rawContent || typeof rawContent !== "string") return [];
@@ -554,7 +342,7 @@ function parseSubscription(rawContent) {
   return [];
 }
 
-// ==================== 3. 动态抓取与容错模块 ====================
+// ==================== 4. 动态抓取与容错模块 ====================
 /**
  * 目标节点源动态探测与抓取模块
  * 针对 free.datiya.com 等每日更新网站提供智能文章抓取与多日容错回退机制
@@ -675,11 +463,333 @@ async function fetchSubscriptionData(customSourceUrl) {
   };
 }
 
-// ==================== 4. Worker 主入口 ====================
+// ==================== 5. 账号密码鉴权模块 ====================
+/**
+ * 账号密码与访问鉴权模块
+ * 支持环境变量配置：AUTH_USERNAME、AUTH_PASSWORD、AUTH_TOKEN
+ * 支持 HTTP Basic Auth、URL UserInfo 及 URL 查询参数 (?token= / ?key= / ?pwd=)
+ */
+
+
+
+/**
+ * 校验请求是否通过身份认证
+ * @param {Request} request 
+ * @param {Object} env 环境变量对象
+ * @returns {{ authenticated: boolean, active: boolean, token?: string }}
+ */
+function verifyAuth(request, env = {}) {
+  const expectedUser = env.AUTH_USERNAME ? String(env.AUTH_USERNAME).trim() : "";
+  const expectedPass = (env.AUTH_PASSWORD || env.AUTH_TOKEN) ? String(env.AUTH_PASSWORD || env.AUTH_TOKEN).trim() : "";
+
+  // 若未配置任何账号密码或 Token，则不开启认证
+  if (!expectedUser && !expectedPass) {
+    return { authenticated: true, active: false };
+  }
+
+  const url = new URL(request.url);
+  const searchParams = url.searchParams;
+
+  // 1. 从 URL 查询参数中提取凭证 (?token= / ?key= / ?auth= / ?pwd=)
+  const queryToken = searchParams.get("token") || searchParams.get("key") || searchParams.get("auth") || searchParams.get("pwd") || searchParams.get("password");
+  const queryUser = searchParams.get("user") || searchParams.get("username");
+
+  if (queryToken && queryToken === expectedPass) {
+    if (!queryUser || !expectedUser || queryUser === expectedUser) {
+      return { authenticated: true, active: true, token: queryToken };
+    }
+  }
+
+  // 2. 从 HTTP Authorization 请求头提取 (Basic Auth)
+  const authHeader = request.headers.get("authorization") || request.headers.get("Authorization");
+  if (authHeader && authHeader.toLowerCase().startsWith("basic ")) {
+    try {
+      const b64Credentials = authHeader.slice(6).trim();
+      const decoded = fromBase64(b64Credentials);
+      const colonIndex = decoded.indexOf(":");
+      if (colonIndex !== -1) {
+        const user = decoded.substring(0, colonIndex);
+        const pass = decoded.substring(colonIndex + 1);
+
+        const userMatches = !expectedUser || user === expectedUser;
+        const passMatches = pass === expectedPass;
+        if (userMatches && passMatches) {
+          return { authenticated: true, active: true, token: pass };
+        }
+      }
+    } catch (err) {}
+  }
+
+  // 3. 从 URL 的 UserInfo 中提取 (如 https://user:pass@domain/sub)
+  if (url.username || url.password) {
+    const userMatches = !expectedUser || url.username === expectedUser;
+    const passMatches = url.password === expectedPass;
+    if (userMatches && passMatches) {
+      return { authenticated: true, active: true, token: url.password };
+    }
+  }
+
+  return { authenticated: false, active: true };
+}
+
+/**
+ * 构造 401 认证挑战响应
+ */
+function buildAuthRequiredResponse() {
+  return new Response(
+    "401 Unauthorized: 访问已被保护。请提供正确的账号密码，或在订阅链接中添加 ?token=您的密码 参数。",
+    {
+      status: 401,
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "WWW-Authenticate": 'Basic realm="ParseFree Protected Area"',
+        "Access-Control-Allow-Origin": "*"
+      }
+    }
+  );
+}
+
+// ==================== 6. UI 渲染模块 ====================
+/**
+ * Web 控制台页面渲染模块
+ * 遵循 Element Plus 企业级风格，简洁、专业、克制
+ */
+
+function renderDashboardHtml({
+  subUrl,
+  b64SubUrl,
+  nodes,
+  targetUrl,
+  sourceDate,
+  method,
+  authInfo = {}
+}) {
+  const nodeCount = nodes.length;
+  const escapedNodes = JSON.stringify(nodes);
+  const isProtected = Boolean(authInfo.active);
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>免费节点订阅解析转换服务</title>
+  <style>
+    :root {
+      --el-color-primary: #409eff;
+      --el-color-success: #67c23a;
+      --el-color-warning: #e6a23c;
+      --el-color-info: #909399;
+      --el-color-danger: #f56c6c;
+      --el-bg-color: #f5f7fa;
+      --el-text-color-primary: #303133;
+      --el-text-color-regular: #606266;
+      --el-text-color-secondary: #909399;
+      --el-border-color: #dcdfe6;
+      --el-border-color-light: #e4e7ed;
+      --card-bg: #ffffff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--el-bg-color);
+      color: var(--el-text-color-primary);
+      line-height: 1.6;
+      padding: 24px;
+    }
+    .container { max-width: 960px; margin: 0 auto; }
+    .header {
+      background: var(--card-bg);
+      border: 1px solid var(--el-border-color-light);
+      border-radius: 6px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+    .header h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; color: var(--el-text-color-primary); }
+    .header p { font-size: 14px; color: var(--el-text-color-regular); }
+    
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--el-border-color-light);
+      border-radius: 6px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+    .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; border-left: 4px solid var(--el-color-primary); padding-left: 10px; }
+    
+    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px; }
+    .meta-item { background: #fafafa; border: 1px solid var(--el-border-color-light); padding: 12px; border-radius: 4px; }
+    .meta-label { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 4px; }
+    .meta-value { font-size: 15px; font-weight: 600; color: var(--el-text-color-primary); word-break: break-all; }
+    
+    .sub-box { margin-bottom: 16px; }
+    .sub-label { font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--el-text-color-regular); }
+    .input-group { display: flex; gap: 8px; }
+    .input-control {
+      flex: 1;
+      padding: 9px 12px;
+      border: 1px solid var(--el-border-color);
+      border-radius: 4px;
+      font-size: 13px;
+      background: #fafafa;
+      color: var(--el-text-color-primary);
+    }
+    .btn {
+      padding: 9px 16px;
+      border-radius: 4px;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 500;
+      border: 1px solid transparent;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: var(--el-color-primary); color: #fff; }
+    .btn-primary:hover { background: #66b1ff; }
+    .btn-default { background: #fff; border-color: var(--el-border-color); color: var(--el-text-color-regular); }
+    .btn-default:hover { border-color: var(--el-color-primary); color: var(--el-color-primary); }
+    
+    .node-list { max-height: 400px; overflow-y: auto; border: 1px solid var(--el-border-color-light); border-radius: 4px; }
+    .node-item {
+      padding: 10px 14px;
+      font-size: 13px;
+      font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      border-bottom: 1px solid var(--el-border-color-light);
+      word-break: break-all;
+      background: #fff;
+    }
+    .node-item:nth-child(even) { background: #fafafa; }
+    .node-item:last-child { border-bottom: none; }
+    .tag {
+      display: inline-block;
+      padding: 2px 6px;
+      font-size: 11px;
+      border-radius: 3px;
+      font-weight: 600;
+      margin-right: 8px;
+    }
+    .tag-vmess { background: #ecf5ff; color: #409eff; border: 1px solid #d9ecff; }
+    .tag-ss { background: #f0f9eb; color: #67c23a; border: 1px solid #e1f3d8; }
+    .tag-anytls { background: #fdf6ec; color: #e6a23c; border: 1px solid #faecd8; }
+    .tag-other { background: #f4f4f5; color: #909399; border: 1px solid #e9e9eb; }
+    
+    .toast {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.75);
+      color: #fff;
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-size: 14px;
+      display: none;
+      z-index: 9999;
+    }
+  </style>
+</head>
+<body>
+  <div class="toast" id="toast">复制成功</div>
+  <div class="container">
+    <div class="header">
+      <h1>免费节点自动同步与格式转换服务</h1>
+      <p>自动抓取每日更新的节点订阅，实时转换为标准节点链接格式（与 格式.txt 结构一致）。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">节点状态概览</div>
+      <div class="meta-grid">
+        <div class="meta-item">
+          <div class="meta-label">已解析可用节点数</div>
+          <div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">数据源发布日期</div>
+          <div class="meta-value">${sourceDate || "最新"}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">获取机制</div>
+          <div class="meta-value">${method === "article_discovery" ? "文章智能抓取" : (method === "date_probe" ? "日期轮询探测" : "自定义源")}</div>
+        </div>
+        <div class="meta-item">
+          <div class="meta-label">访问鉴权保护</div>
+          <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启 (密码保护)" : "未开启 (公开访问)"}</div>
+        </div>
+      </div>
+      <div class="meta-label">当前解析上游源地址：</div>
+      <div style="font-size: 13px; color: var(--el-text-color-regular); font-family: monospace; word-break: break-all;">${targetUrl}</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">订阅地址获取</div>
+      <div class="sub-box">
+        <div class="sub-label">1. 通用明文订阅链接（每行一个节点，推荐导入 Shadowrocket / v2rayN / sing-box / NekoBox）：</div>
+        <div class="input-group">
+          <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
+          <button class="btn btn-primary" onclick="copyText('${subUrl}')">复制订阅链接</button>
+        </div>
+      </div>
+      <div class="sub-box">
+        <div class="sub-label">2. Base64 编码订阅链接（适用于仅支持 base64 订阅的客户端）：</div>
+        <div class="input-group">
+          <input type="text" class="input-control" readonly id="b64SubInput" value="${b64SubUrl}">
+          <button class="btn btn-default" onclick="copyText('${b64SubUrl}')">复制 Base64 链接</button>
+        </div>
+      </div>
+      <div style="margin-top: 16px;">
+        <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部节点链接</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">节点链接明细 (${nodeCount})</div>
+      <div class="node-list">
+        ${nodes.map((n) => {
+          const proto = n.split("://")[0] || "node";
+          let tagClass = "tag-other";
+          if (proto === "vmess") tagClass = "tag-vmess";
+          else if (proto === "ss") tagClass = "tag-ss";
+          else if (proto === "anytls") tagClass = "tag-anytls";
+          return `<div class="node-item"><span class="tag ${tagClass}">${proto.toUpperCase()}</span>${n}</div>`;
+        }).join("")}
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const allNodes = ${escapedNodes};
+
+    function showToast(msg) {
+      const t = document.getElementById("toast");
+      t.innerText = msg;
+      t.style.display = "block";
+      setTimeout(() => { t.style.display = "none"; }, 2000);
+    }
+
+    function copyText(val) {
+      navigator.clipboard.writeText(val).then(() => {
+        showToast("已复制到剪贴板");
+      }).catch(() => {
+        prompt("请手动复制：", val);
+      });
+    }
+
+    function copyAllNodes() {
+      const text = allNodes.join("\\n");
+      copyText(text);
+    }
+  </script>
+</body>
+</html>`;
+}
+
+// ==================== 7. Worker 主入口 ====================
 /**
  * Cloudflare Worker 主入口
  * 路由分发、Cache API 缓存控制与结果输出
  */
+
+
 
 
 
@@ -701,7 +811,13 @@ export default {
     const url = new URL(request.url);
     const { pathname, searchParams } = url;
 
-    // 1. 提取请求参数
+    // 1. 访问鉴权校验（环境变量配置 AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN）
+    const auth = verifyAuth(request, env);
+    if (!auth.authenticated) {
+      return buildAuthRequiredResponse();
+    }
+
+    // 2. 提取请求参数
     const customSource = searchParams.get("source") || searchParams.get("url");
     const format = (searchParams.get("format") || "").toLowerCase();
     const isB64 = searchParams.get("b64") === "1" || searchParams.get("b64") === "true" || format === "base64" || format === "b64";
@@ -757,8 +873,9 @@ export default {
 
       // 6. 浏览器访问根路径 -> 渲染可视化 Web 控制台
       const baseUrl = `${url.protocol}//${url.host}`;
-      const subUrl = `${baseUrl}/sub`;
-      const b64SubUrl = `${baseUrl}/sub?b64=1`;
+      const tokenParam = auth.token ? `token=${encodeURIComponent(auth.token)}` : "";
+      const subUrl = tokenParam ? `${baseUrl}/sub?${tokenParam}` : `${baseUrl}/sub`;
+      const b64SubUrl = tokenParam ? `${baseUrl}/sub?b64=1&${tokenParam}` : `${baseUrl}/sub?b64=1`;
 
       const html = renderDashboardHtml({
         subUrl,
@@ -766,7 +883,8 @@ export default {
         nodes,
         targetUrl,
         sourceDate: meta.sourceDate,
-        method: meta.method
+        method: meta.method,
+        authInfo: auth
       });
 
       const response = new Response(html, {
