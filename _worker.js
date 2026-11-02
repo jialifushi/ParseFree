@@ -469,19 +469,22 @@ async function fetchSubscriptionData(customSourceUrl) {
 // ==================== 5. 订阅源与状态管理模块 ====================
 /**
  * 订阅源与每日更新状态管理模块
- * 支持自动日期递增模式、V2Ray/Clash源切换、手动编辑地址及成功获取后停止探测机制
+ * 支持自动日期递增、失败重试间隔退避、失败期间自动回退最新有效数据与成功后锁定停止机制
  */
 
 
 
+const DEFAULT_RETRY_INTERVAL_MINUTES = 10;
+
 // 内存中记录的最新状态缓存
 let memoryState = {
-  date: "",           // 当前缓存数据的日期 (YYYYMMDD)
-  type: "clash",      // 请求的源类型: clash | v2ray
-  isTodayReady: false,// 今天的数据是否已成功拿到（一旦拿到即锁定，停止定时探测）
-  targetUrl: "",      // 实际使用的源地址
-  content: "",        // 源订阅文本内容
-  lastCheckTime: 0    // 最近探测检查时间戳
+  date: "",            // 当前提供数据的日期 (YYYYMMDD)
+  type: "clash",       // 源类型: clash | v2ray
+  isTodayReady: false, // 今天的数据是否已成功拿到（一旦拿到即锁定，停止定时探测）
+  targetUrl: "",       // 实际使用的源地址
+  content: "",         // 源订阅文本内容
+  lastSuccessTime: 0,  // 最近一次成功获取的时间戳
+  lastFailedTime: 0    // 最近一次探测今日失败的时间戳
 };
 
 /**
@@ -493,7 +496,7 @@ function buildSourceUrl(dateStr, type = "clash", baseUrl = DEFAULT_BASE_URL) {
 }
 
 /**
- * 从 KV 或环境变量中加载手动保存的持久化配置
+ * 从 KV 或环境变量中加载持久化配置
  */
 async function getSavedConfig(env = {}) {
   const kv = env.PARSEFREE_KV || env.KV;
@@ -506,12 +509,13 @@ async function getSavedConfig(env = {}) {
   return {
     mode: env.SOURCE_MODE || "auto",
     type: env.SOURCE_TYPE || "clash",
-    manualUrl: env.CUSTOM_SOURCE_URL || ""
+    manualUrl: env.CUSTOM_SOURCE_URL || "",
+    retryInterval: Number(env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES
   };
 }
 
 /**
- * 尝试抓取指定 URL 并验证内容有效性
+ * 抓取指定 URL 并验证有效性
  */
 async function fetchValidContent(url) {
   try {
@@ -529,18 +533,21 @@ async function fetchValidContent(url) {
 }
 
 /**
- * 智能获取订阅数据（核心状态机）
- * 每天00点之后自动更新目标日期，一旦成功拿到今天的数据即停止探测并锁定
+ * 智能解析订阅数据（状态机）
+ * 每天00点后自动递增，失败按设定间隔重试，失败期间自动回退最新可用数据，成功后立刻停止探测
  */
 async function resolveSubscriptionData({
   requestedSource = "",
   requestedType = "",
+  requestedInterval = null,
   forceRefresh = false,
   env = {}
 }) {
   const savedConfig = await getSavedConfig(env);
   const type = (requestedType || savedConfig.type || "clash").toLowerCase();
   const manualUrl = requestedSource || (savedConfig.mode === "manual" ? savedConfig.manualUrl : "");
+  const retryMinutes = Math.max(1, Number(requestedInterval) || savedConfig.retryInterval || DEFAULT_RETRY_INTERVAL_MINUTES);
+  const retryCooldownMs = retryMinutes * 60 * 1000;
 
   // 1. 手动模式：直接使用指定地址
   if (manualUrl) {
@@ -556,15 +563,16 @@ async function resolveSubscriptionData({
       sourceDate: dateMatch ? dateMatch[1] : "manual",
       isToday: true,
       mode: "manual",
-      type
+      type,
+      retryMinutes
     };
   }
 
-  // 2. 自动模式：基于当前北京时间 (UTC+8) 的日期自动递增
+  // 2. 自动模式：基于北京时间 (UTC+8) 的日期自动递增
   const bjNow = getBeijingDate();
   const todayStr = formatDate(bjNow);
 
-  // 检查内存中是否已拿到今天的数据且类型一致
+  // A. 今日数据已锁定：直接返回，完全停止探测
   if (!forceRefresh && memoryState.isTodayReady && memoryState.date === todayStr && memoryState.type === type && memoryState.content) {
     return {
       content: memoryState.content,
@@ -572,25 +580,46 @@ async function resolveSubscriptionData({
       sourceDate: memoryState.date,
       isToday: true,
       mode: "auto",
-      type
+      type,
+      retryMinutes,
+      statusMsg: "今日数据已锁定 (停止探测)"
     };
   }
 
-  // 候选类型列表：若指定 v2ray，当 v2ray 为空时自动降级回退到 clash 兜底
-  const candidateTypes = type === "v2ray" ? ["v2ray", "clash"] : ["clash"];
+  // B. 检查失败重试冷却期：若刚失败不久且已有可用回退数据，则暂不重复探测，直接回退返回最新数据
+  const timeSinceLastFail = Date.now() - memoryState.lastFailedTime;
+  const isCoolingDown = !forceRefresh && memoryState.lastFailedTime > 0 && timeSinceLastFail < retryCooldownMs;
 
-  // 3. 优先探测当天的最新地址
+  if (isCoolingDown && memoryState.content) {
+    const waitSeconds = Math.ceil((retryCooldownMs - timeSinceLastFail) / 1000);
+    return {
+      content: memoryState.content,
+      targetUrl: memoryState.targetUrl,
+      sourceDate: memoryState.date,
+      isToday: false,
+      mode: "auto",
+      type,
+      retryMinutes,
+      isCoolingDown: true,
+      statusMsg: `今日源待发布，冷却重试中 (已回退，${waitSeconds} 秒后允许再次探测)`
+    };
+  }
+
+  // C. 发起对今日新源的探测
+  const candidateTypes = type === "v2ray" ? ["v2ray", "clash"] : ["clash"];
   for (const cType of candidateTypes) {
     const todayUrl = buildSourceUrl(todayStr, cType);
     const content = await fetchValidContent(todayUrl);
     if (content) {
+      // 成功拿到今日新数据 -> 锁定状态，清空失败标记，停止后续探测
       memoryState = {
         date: todayStr,
         type,
-        isTodayReady: true, // 锁定今日就绪，后续停止探测
+        isTodayReady: true,
         targetUrl: todayUrl,
         content,
-        lastCheckTime: Date.now()
+        lastSuccessTime: Date.now(),
+        lastFailedTime: 0
       };
       return {
         content,
@@ -598,12 +627,31 @@ async function resolveSubscriptionData({
         sourceDate: todayStr,
         isToday: true,
         mode: "auto",
-        type
+        type,
+        retryMinutes,
+        statusMsg: "今日数据已成功获取并锁定"
       };
     }
   }
 
-  // 4. 当天新文件尚未上传（如凌晨404）-> 容错回退机制，依次尝试昨日、前日
+  // D. 探测今日失败 -> 记录失败时间戳，启动间隔退避
+  memoryState.lastFailedTime = Date.now();
+
+  // 若已有历史有效数据，立即自动回退返回
+  if (memoryState.content && memoryState.type === type) {
+    return {
+      content: memoryState.content,
+      targetUrl: memoryState.targetUrl,
+      sourceDate: memoryState.date,
+      isToday: false,
+      mode: "auto",
+      type,
+      retryMinutes,
+      statusMsg: `今日数据尚未上传，已自动回退使用 ${memoryState.date} 数据`
+    };
+  }
+
+  // E. 内存无数据时，向前回退探测前 1~3 天有效数据兜底
   for (let offset = 1; offset <= 3; offset++) {
     const pastDate = new Date(bjNow.getTime() - offset * 86400000);
     const pastDateStr = formatDate(pastDate);
@@ -615,48 +663,54 @@ async function resolveSubscriptionData({
         memoryState = {
           date: pastDateStr,
           type,
-          isTodayReady: false, // 标记今天数据尚未 ready，下次请求或 cron 将继续探测
+          isTodayReady: false,
           targetUrl: pastUrl,
           content,
-          lastCheckTime: Date.now()
+          lastSuccessTime: Date.now(),
+          lastFailedTime: Date.now()
         };
         return {
           content,
           targetUrl: pastUrl,
           sourceDate: pastDateStr,
-          isToday: false, // 说明当前是回退数据
+          isToday: false,
           mode: "auto",
-          type
+          type,
+          retryMinutes,
+          statusMsg: `已自动回退使用 ${pastDateStr} 最新有效数据`
         };
       }
     }
   }
 
-  throw new Error(`无法获取可用节点数据，已尝试探测今日 [${todayStr}] 及前 3 日源均无响应。`);
+  throw new Error(`无法获取可用节点数据，探测今日 [${todayStr}] 及前 3 日源均无有效响应。`);
 }
 
 /**
- * 定时任务 (Cron Trigger) 触发执行函数
- * 仅当今天数据尚未拿到时才触发网络探测，一旦拿到立刻停止探测
+ * 定时任务 (Cron Trigger) 处理函数
+ * 遵循重试间隔限制，今日一旦成功获取立即停止探测
  */
 async function handleScheduledTask(env = {}) {
   const bjNow = getBeijingDate();
   const todayStr = formatDate(bjNow);
 
-  // 若今日数据已就绪，直接跳过本次定时获取
   if (memoryState.isTodayReady && memoryState.date === todayStr) {
-    console.log(`[Cron] 今日数据已锁定 [${todayStr}]，无需重复探测。`);
+    console.log(`[Cron] 今日数据已锁定 [${todayStr}]，停止探测。`);
     return;
   }
 
-  console.log(`[Cron] 开始探测今日订阅数据 [${todayStr}]...`);
+  const savedConfig = await getSavedConfig(env);
+  const retryCooldownMs = (savedConfig.retryInterval || DEFAULT_RETRY_INTERVAL_MINUTES) * 60 * 1000;
+  if (memoryState.lastFailedTime > 0 && Date.now() - memoryState.lastFailedTime < retryCooldownMs) {
+    console.log(`[Cron] 尚在探测失败重试间隔内，暂不发起探测。`);
+    return;
+  }
+
+  console.log(`[Cron] 间隔期已满，开始探测今日新源 [${todayStr}]...`);
   try {
     await resolveSubscriptionData({ forceRefresh: true, env });
-    if (memoryState.isTodayReady) {
-      console.log(`[Cron] 成功获取今日最新数据 [${todayStr}]，已锁定停止探测！`);
-    }
   } catch (err) {
-    console.warn(`[Cron] 今日数据暂未上传，保持回退状态:`, err.message);
+    console.warn(`[Cron] 今日新源尚未发布:`, err.message);
   }
 }
 
@@ -664,8 +718,9 @@ async function handleScheduledTask(env = {}) {
 /**
  * 节点名称清洗与自定义重命名模块
  * 1. 识别并清理源数据中的广告/宣传信息（如 "tg频道:@freenodedaily"），替换为指定的首节点名称
- * 2. 为其他所有节点自动增加指定前缀（如 "HOS自动化线路 "）
- * 3. 支持环境变量 (FIRST_NODE_NAME / NODE_PREFIX) 与 URL 参数自定义
+ * 2. 首节点自动追加数据来源日期的“日”部分（如 20261102 -> "HOS Daily官方维护02"），一目了然识别今日是否已更新
+ * 3. 为其他所有节点自动增加指定前缀（如 "HOS自动化线路 "）
+ * 4. 支持环境变量与 URL 参数深度自定义
  */
 
 
@@ -691,7 +746,6 @@ const AD_PATTERNS = [
  */
 function isAdvertisement(name = "", index = 0) {
   if (!name) return false;
-  // 若是首个节点且包含 tg 或 @ 符号，直接判定为宣传节点
   if (index === 0 && /(tg|@|http|频道|群)/i.test(name)) {
     return true;
   }
@@ -699,17 +753,32 @@ function isAdvertisement(name = "", index = 0) {
 }
 
 /**
- * 格式化单个节点的名称
+ * 格式化单个节点的显示名称
+ * @param {string} rawName 原始名称
+ * @param {number} index 节点索引 (0 为首节点)
+ * @param {Object} options 配置项 (firstName, prefix, sourceDate)
  */
 function formatNodeDisplayName(rawName = "", index = 0, {
   firstName = DEFAULT_FIRST_NODE_NAME,
-  prefix = DEFAULT_NODE_PREFIX
+  prefix = DEFAULT_NODE_PREFIX,
+  sourceDate = ""
 } = {}) {
   const trimmed = rawName.trim();
-  // 命中广告特征或者是首个宣传节点
-  if (isAdvertisement(trimmed, index)) {
-    return firstName || DEFAULT_FIRST_NODE_NAME;
+
+  // 首个节点或命中宣传广告特征的节点
+  if (isAdvertisement(trimmed, index) || index === 0) {
+    let baseName = (firstName || DEFAULT_FIRST_NODE_NAME).trim();
+    // 从 sourceDate 中提取 2 位日部分 (如 20261102 -> 02)
+    const match = String(sourceDate).match(/(\d{4})(\d{2})(\d{2})/);
+    if (match) {
+      const dayStr = match[3];
+      if (!baseName.endsWith(dayStr)) {
+        baseName = `${baseName}${dayStr}`;
+      }
+    }
+    return baseName;
   }
+
   // 普通节点：若尚未包含该前缀，则添加前缀
   if (prefix && !trimmed.startsWith(prefix.trim())) {
     return `${prefix}${trimmed}`;
@@ -719,7 +788,6 @@ function formatNodeDisplayName(rawName = "", index = 0, {
 
 /**
  * 重写标准节点 URI 链接中的节点名称
- * 支持 VMess (JSON ps 字段)、SS/Trojan/VLESS/AnyTLS (URI # 哈希名称)
  */
 function renameUriNode(uri, index = 0, options = {}) {
   if (!uri || typeof uri !== "string") return uri;
@@ -738,7 +806,7 @@ function renameUriNode(uri, index = 0, options = {}) {
     }
   }
 
-  // 2. 其它带有 # 备注名称的标准 URI (ss://, trojan://, vless://, anytls://, etc.)
+  // 2. 带有 # 备注名称的标准 URI (ss://, trojan://, vless://, anytls://, etc.)
   const hashIdx = uri.indexOf("#");
   if (hashIdx !== -1) {
     const basePart = uri.substring(0, hashIdx);
@@ -866,7 +934,9 @@ function renderDashboardHtml({
   mode,
   type,
   authInfo = {},
-  renameOptions = {}
+  renameOptions = {},
+  retryMinutes = 10,
+  statusMsg = ""
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
@@ -946,7 +1016,7 @@ function renderDashboardHtml({
   <div class="container">
     <div class="card" style="margin-bottom: 16px;">
       <h1 style="font-size: 18px; font-weight: 600; margin-bottom: 6px;">ParseFree 免费节点自动同步与转换服务</h1>
-      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。广告信息自动清理，节点名称统一规范化。</p>
+      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。首节点附带日期标识，失败期间自动回退最新有效数据。</p>
     </div>
 
     <!-- 1. 运行状态卡片 -->
@@ -958,12 +1028,12 @@ function renderDashboardHtml({
           <div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div>
         </div>
         <div class="meta-item">
-          <div class="meta-label">数据来源与日期</div>
+          <div class="meta-label">数据来源日期</div>
           <div class="meta-value">${sourceDate} (${isAutoMode ? (isToday ? "今日已锁定" : "自动回退中") : "手动"})</div>
         </div>
         <div class="meta-item">
-          <div class="meta-label">源文件格式</div>
-          <div class="meta-value">${isV2ray ? "V2Ray 格式 (.txt)" : "Clash 格式 (.yaml)"}</div>
+          <div class="meta-label">探测与回退状态</div>
+          <div class="meta-value" style="font-size: 13px; color: ${isToday ? 'var(--el-color-success)' : 'var(--el-color-warning)'};">${statusMsg || (isToday ? "已成功锁定今日数据" : "自动回退使用最新有效数据")}</div>
         </div>
         <div class="meta-item">
           <div class="meta-label">安全鉴权状态</div>
@@ -976,7 +1046,7 @@ function renderDashboardHtml({
 
     <!-- 2. 数据源模式设置与手动编辑卡片 -->
     <div class="card">
-      <div class="card-title">数据源模式与手动编辑</div>
+      <div class="card-title">数据源模式与探测间隔设置</div>
       <div style="margin-bottom: 14px;">
         <span style="font-size: 13px; font-weight: 600; margin-right: 12px;">运行模式：</span>
         <label class="radio-label"><input type="radio" name="workMode" value="auto" ${isAutoMode ? "checked" : ""} onchange="switchMode('auto')"> 自动日期递增模式 (每日00点后自动更新)</label>
@@ -994,6 +1064,11 @@ function renderDashboardHtml({
           <button class="btn btn-primary" onclick="applyManualUrl()">应用此地址</button>
         </div>
       </div>
+      <div style="display: flex; align-items: center; gap: 10px; margin-top: 8px;">
+        <span style="font-size: 13px; color: var(--el-text-regular);">失败重试探测间隔 (分钟)：</span>
+        <input type="number" min="1" max="1440" class="input-control" id="intervalInput" value="${retryMinutes}" style="width: 100px; flex: none;">
+        <button class="btn btn-default" onclick="applyInterval()">更新间隔</button>
+      </div>
     </div>
 
     <!-- 3. 自定义节点命名与广告清理卡片 -->
@@ -1001,15 +1076,17 @@ function renderDashboardHtml({
       <div class="card-title">节点命名与广告清理设置</div>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 12px;">
         <div>
-          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">首节点 / 广告宣传替换名称：</div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">首节点名称 (将自动附带日期后2位)：</div>
           <input type="text" class="input-control" id="firstNameInput" value="${firstName}" style="width: 100%;">
+          <div style="font-size: 11px; color: var(--el-text-secondary); margin-top: 2px;">例如数据源为 02日，首节点将自动显示为：“${firstName}02”</div>
         </div>
         <div>
-          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">普通节点线路前缀：</div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">普通节点线路前缀：</div>
           <input type="text" class="input-control" id="prefixInput" value="${prefix}" style="width: 100%;">
+          <div style="font-size: 11px; color: var(--el-text-secondary); margin-top: 2px;">后续所有节点前面都统一加上该前缀</div>
         </div>
       </div>
-      <button class="btn btn-primary" onclick="applyRenameOptions()">应用节点命名规则</button>
+      <button class="btn btn-primary" onclick="applyRenameOptions()">应用命名规则</button>
     </div>
 
     <!-- 4. 订阅地址获取卡片 -->
@@ -1080,6 +1157,12 @@ function renderDashboardHtml({
       u.searchParams.set("source", val);
       window.location.href = u.toString();
     }
+    function applyInterval() {
+      const val = document.getElementById("intervalInput").value.trim();
+      const u = new URL(window.location.href);
+      if (val) u.searchParams.set("retry_interval", val);
+      window.location.href = u.toString();
+    }
     function applyRenameOptions() {
       const fn = document.getElementById("firstNameInput").value.trim();
       const p = document.getElementById("prefixInput").value;
@@ -1133,6 +1216,7 @@ export default {
     // 2. 提取请求参数
     const requestedSource = searchParams.get("source") || searchParams.get("url") || "";
     const requestedType = searchParams.get("type") || ""; // clash | v2ray
+    const requestedInterval = searchParams.get("retry_interval") || searchParams.get("interval") || null;
     const format = (searchParams.get("format") || "").toLowerCase();
     const isB64 = searchParams.get("b64") === "1" || searchParams.get("b64") === "true" || format === "base64" || format === "b64";
     const filterKeyword = searchParams.get("filter") || "";
@@ -1155,13 +1239,14 @@ export default {
       const data = await resolveSubscriptionData({
         requestedSource,
         requestedType,
+        requestedInterval,
         forceRefresh,
         env
       });
       let nodes = parseSubscription(data.content);
 
-      // 5. 广告宣传信息清洗与节点自定义重命名
-      nodes = processAndRenameNodes(nodes, { firstName, prefix });
+      // 5. 广告宣传信息清洗与节点自定义重命名（首节点自动附带日部分）
+      nodes = processAndRenameNodes(nodes, { firstName, prefix, sourceDate: data.sourceDate });
 
       // 6. 关键词过滤
       if (filterKeyword) {
@@ -1204,6 +1289,7 @@ export default {
       if (requestedSource) queryParts.push(`source=${encodeURIComponent(requestedSource)}`);
       if (firstName !== DEFAULT_FIRST_NODE_NAME) queryParts.push(`first_name=${encodeURIComponent(firstName)}`);
       if (prefix !== DEFAULT_NODE_PREFIX) queryParts.push(`prefix=${encodeURIComponent(prefix)}`);
+      if (requestedInterval) queryParts.push(`retry_interval=${encodeURIComponent(requestedInterval)}`);
 
       const queryStr = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
       const b64QueryStr = queryParts.length > 0 ? `?b64=1&${queryParts.join("&")}` : "?b64=1";
@@ -1221,7 +1307,9 @@ export default {
         mode: data.mode,
         type: data.type,
         authInfo: auth,
-        renameOptions: { firstName, prefix }
+        renameOptions: { firstName, prefix },
+        retryMinutes: data.retryMinutes,
+        statusMsg: data.statusMsg
       });
 
       const response = new Response(html, {

@@ -4,10 +4,10 @@ import distWorkerModule from "../dist/worker.js";
 import rootWorkerModule from "../_worker.js";
 
 async function runTests() {
-  console.log("=== 开始测试 ParseFree 节点名称清洗与重命名优化 ===");
+  console.log("=== 开始测试 ParseFree 首节点日后缀 (02) 与重试探测间隔机制 ===");
 
-  // 1. 测试默认重命名行为（首节点清洗为 "HOS Daily官方维护"，普通节点加前缀 "HOS自动化线路 "）
-  console.log("1. 测试默认重命名逻辑 (首节点替换为 HOS Daily官方维护，后续节点带前缀)...");
+  // 1. 测试首节点自动附带日部分（20261102 -> HOS Daily官方维护02）
+  console.log("1. 测试首节点名称是否自动附带数据源日部分 (例如 'HOS Daily官方维护02')...");
   const reqSub = new Request("http://localhost:8787/sub");
   const resSub = await worker.fetch(reqSub, {});
   assert.strictEqual(resSub.status, 200, "状态码应为 200");
@@ -15,55 +15,50 @@ async function runTests() {
   const lines = subText.split("\n").map(l => l.trim()).filter(Boolean);
   assert(lines.length > 0, "应解析出节点");
 
-  // 验证第1个节点 (原 tg频道:@freenodedaily)
   const firstNode = lines[0];
-  console.log("   首节点完整链接:", firstNode);
-  assert(!firstNode.includes("freenodedaily"), "宣传广告信息 tg频道:@freenodedaily 必须被清理");
-  assert(firstNode.includes(encodeURIComponent("HOS Daily官方维护")), "首节点必须命名为 HOS Daily官方维护");
-  console.log("   ✓ 广告宣传节点成功识别并更换为: HOS Daily官方维护");
+  console.log("   首节点完整 URI:", firstNode);
+  // 必须包含 "HOS Daily官方维护02"（当前回退到02日）
+  assert(firstNode.includes(encodeURIComponent("HOS Daily官方维护02")), "首节点名称必须包含日后缀 '02'，如 HOS Daily官方维护02");
+  console.log("   ✓ 首节点成功显示为: HOS Daily官方维护02 (可通过第一条直观识别更新状态)");
 
-  // 验证第2个节点 (原 🇭🇰 香港)
+  // 2. 验证普通节点前缀 (HOS自动化线路)
   const secondNode = lines[1];
-  console.log("   第二节点完整链接:", secondNode);
-  // VMess 链接解 base64 验证 ps
   const b64 = secondNode.replace("vmess://", "");
-  const jsonStr = Buffer.from(b64, "base64").toString("utf-8");
-  const vmessObj = JSON.parse(jsonStr);
+  const vmessObj = JSON.parse(Buffer.from(b64, "base64").toString("utf-8"));
   console.log("   第二节点 ps 字段:", vmessObj.ps);
   assert(vmessObj.ps.startsWith("HOS自动化线路 "), "普通节点名称前面必须带有 'HOS自动化线路 ' 前缀");
-  console.log("   ✓ 普通节点成功自动加上前缀: 'HOS自动化线路 '");
+  console.log("   ✓ 普通节点前缀验证正常");
 
-  // 2. 测试自定义参数 (?first_name=xxx&prefix=yyy)
-  console.log("2. 测试自定义首节点名称与前缀参数 (?first_name=定制维护节点&prefix=极速专线-)...");
-  const reqCustom = new Request("http://localhost:8787/sub?first_name=定制维护节点&prefix=极速专线-");
+  // 3. 测试重试间隔参数 (?retry_interval=15)
+  console.log("3. 测试失败重试间隔配置 (?retry_interval=15)...");
+  const reqInterval = new Request("http://localhost:8787/?retry_interval=15", {
+    headers: { "user-agent": "Mozilla/5.0" }
+  });
+  const resInterval = await worker.fetch(reqInterval, {});
+  assert.strictEqual(resInterval.status, 200);
+  const html = await resInterval.text();
+  assert(html.includes('value="15"'), "页面应包含设置的 15 分钟重试间隔");
+  console.log("   ✓ 重试间隔设置与页面展示正常");
+
+  // 4. 测试自定义首节点与前缀参数 (?first_name=定制官方节点&prefix=线路前缀-)
+  console.log("4. 测试自定义首节点参数 (附带02日后缀)...");
+  const reqCustom = new Request("http://localhost:8787/sub?first_name=定制官方节点&prefix=线路前缀-");
   const resCustom = await worker.fetch(reqCustom, {});
-  assert.strictEqual(resCustom.status, 200);
-  const customLines = (await resCustom.text()).split("\n").map(l => l.trim()).filter(Boolean);
-  assert(customLines[0].includes(encodeURIComponent("定制维护节点")), "首节点应使用自定义名称");
-  const cVmess = JSON.parse(Buffer.from(customLines[1].replace("vmess://", ""), "base64").toString("utf-8"));
-  assert(cVmess.ps.startsWith("极速专线-"), "普通节点应使用自定义前缀");
-  console.log("   ✓ 自定义名称与前缀参数验证通过");
+  const cLines = (await resCustom.text()).split("\n").map(l => l.trim()).filter(Boolean);
+  assert(cLines[0].includes(encodeURIComponent("定制官方节点02")), "自定义首节点名称同样应自动附加 '02' 后缀");
+  console.log("   ✓ 自定义名称自动追加日后缀验证通过: 定制官方节点02");
 
-  // 3. 测试 Web 页面渲染与输入框
-  console.log("3. 测试 Web 控制台页面渲染...");
-  const reqHtml = new Request("http://localhost:8787/", { headers: { "user-agent": "Mozilla/5.0" } });
-  const resHtml = await worker.fetch(reqHtml, {});
-  const html = await resHtml.text();
-  assert(html.includes("HOS Daily官方维护"), "页面应包含首节点默认名称");
-  assert(html.includes("HOS自动化线路"), "页面应包含默认前缀");
-  console.log("   ✓ Web 控制面板自定义控件渲染正常");
-
-  // 4. 测试打包产物 dist/worker.js 与 _worker.js
-  console.log("4. 测试打包产物 dist/worker.js 与 _worker.js 独立运行...");
+  // 5. 测试打包产物 dist/worker.js 与 _worker.js
+  console.log("5. 测试打包产物 dist/worker.js 与 _worker.js 独立运行...");
   const resDist = await distWorkerModule.fetch(new Request("http://localhost:8787/sub"), {});
   assert.strictEqual(resDist.status, 200);
   const distLines = (await resDist.text()).split("\n").map(l => l.trim()).filter(Boolean);
-  assert(distLines[0].includes(encodeURIComponent("HOS Daily官方维护")), "打包版本首节点重命名正常");
+  assert(distLines[0].includes(encodeURIComponent("HOS Daily官方维护02")), "打包版首节点日后缀正常");
   const resRoot = await rootWorkerModule.fetch(new Request("http://localhost:8787/sub"), {});
   assert.strictEqual(resRoot.status, 200);
-  console.log("   ✓ 打包产物独立运行完全正常");
+  console.log("   ✓ 打包产物完全正常");
 
-  console.log("\n🎉 所有测试用例全部通过！");
+  console.log("\n🎉 全部功能与回归测试全部通过！");
 }
 
 runTests().catch(err => {

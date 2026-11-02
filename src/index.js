@@ -35,6 +35,7 @@ export default {
     // 2. 提取请求参数
     const requestedSource = searchParams.get("source") || searchParams.get("url") || "";
     const requestedType = searchParams.get("type") || ""; // clash | v2ray
+    const requestedInterval = searchParams.get("retry_interval") || searchParams.get("interval") || null;
     const format = (searchParams.get("format") || "").toLowerCase();
     const isB64 = searchParams.get("b64") === "1" || searchParams.get("b64") === "true" || format === "base64" || format === "b64";
     const filterKeyword = searchParams.get("filter") || "";
@@ -57,13 +58,14 @@ export default {
       const data = await resolveSubscriptionData({
         requestedSource,
         requestedType,
+        requestedInterval,
         forceRefresh,
         env
       });
       let nodes = parseSubscription(data.content);
 
-      // 5. 广告宣传信息清洗与节点自定义重命名
-      nodes = processAndRenameNodes(nodes, { firstName, prefix });
+      // 5. 广告宣传信息清洗与节点自定义重命名（首节点自动附带日部分）
+      nodes = processAndRenameNodes(nodes, { firstName, prefix, sourceDate: data.sourceDate });
 
       // 6. 关键词过滤
       if (filterKeyword) {
@@ -106,6 +108,7 @@ export default {
       if (requestedSource) queryParts.push(`source=${encodeURIComponent(requestedSource)}`);
       if (firstName !== DEFAULT_FIRST_NODE_NAME) queryParts.push(`first_name=${encodeURIComponent(firstName)}`);
       if (prefix !== DEFAULT_NODE_PREFIX) queryParts.push(`prefix=${encodeURIComponent(prefix)}`);
+      if (requestedInterval) queryParts.push(`retry_interval=${encodeURIComponent(requestedInterval)}`);
 
       const queryStr = queryParts.length > 0 ? `?${queryParts.join("&")}` : "";
       const b64QueryStr = queryParts.length > 0 ? `?b64=1&${queryParts.join("&")}` : "?b64=1";
@@ -123,7 +126,9 @@ export default {
         mode: data.mode,
         type: data.type,
         authInfo: auth,
-        renameOptions: { firstName, prefix }
+        renameOptions: { firstName, prefix },
+        retryMinutes: data.retryMinutes,
+        statusMsg: data.statusMsg
       });
 
       const response = new Response(html, {

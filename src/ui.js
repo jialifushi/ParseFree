@@ -14,7 +14,9 @@ export function renderDashboardHtml({
   mode,
   type,
   authInfo = {},
-  renameOptions = {}
+  renameOptions = {},
+  retryMinutes = 10,
+  statusMsg = ""
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
@@ -94,7 +96,7 @@ export function renderDashboardHtml({
   <div class="container">
     <div class="card" style="margin-bottom: 16px;">
       <h1 style="font-size: 18px; font-weight: 600; margin-bottom: 6px;">ParseFree 免费节点自动同步与转换服务</h1>
-      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。广告信息自动清理，节点名称统一规范化。</p>
+      <p style="font-size: 13px; color: var(--el-text-regular);">每日00点后自动更新地址，一旦获取成功自动停止探测并锁定。首节点附带日期标识，失败期间自动回退最新有效数据。</p>
     </div>
 
     <!-- 1. 运行状态卡片 -->
@@ -106,12 +108,12 @@ export function renderDashboardHtml({
           <div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div>
         </div>
         <div class="meta-item">
-          <div class="meta-label">数据来源与日期</div>
+          <div class="meta-label">数据来源日期</div>
           <div class="meta-value">${sourceDate} (${isAutoMode ? (isToday ? "今日已锁定" : "自动回退中") : "手动"})</div>
         </div>
         <div class="meta-item">
-          <div class="meta-label">源文件格式</div>
-          <div class="meta-value">${isV2ray ? "V2Ray 格式 (.txt)" : "Clash 格式 (.yaml)"}</div>
+          <div class="meta-label">探测与回退状态</div>
+          <div class="meta-value" style="font-size: 13px; color: ${isToday ? 'var(--el-color-success)' : 'var(--el-color-warning)'};">${statusMsg || (isToday ? "已成功锁定今日数据" : "自动回退使用最新有效数据")}</div>
         </div>
         <div class="meta-item">
           <div class="meta-label">安全鉴权状态</div>
@@ -124,7 +126,7 @@ export function renderDashboardHtml({
 
     <!-- 2. 数据源模式设置与手动编辑卡片 -->
     <div class="card">
-      <div class="card-title">数据源模式与手动编辑</div>
+      <div class="card-title">数据源模式与探测间隔设置</div>
       <div style="margin-bottom: 14px;">
         <span style="font-size: 13px; font-weight: 600; margin-right: 12px;">运行模式：</span>
         <label class="radio-label"><input type="radio" name="workMode" value="auto" ${isAutoMode ? "checked" : ""} onchange="switchMode('auto')"> 自动日期递增模式 (每日00点后自动更新)</label>
@@ -142,6 +144,11 @@ export function renderDashboardHtml({
           <button class="btn btn-primary" onclick="applyManualUrl()">应用此地址</button>
         </div>
       </div>
+      <div style="display: flex; align-items: center; gap: 10px; margin-top: 8px;">
+        <span style="font-size: 13px; color: var(--el-text-regular);">失败重试探测间隔 (分钟)：</span>
+        <input type="number" min="1" max="1440" class="input-control" id="intervalInput" value="${retryMinutes}" style="width: 100px; flex: none;">
+        <button class="btn btn-default" onclick="applyInterval()">更新间隔</button>
+      </div>
     </div>
 
     <!-- 3. 自定义节点命名与广告清理卡片 -->
@@ -149,15 +156,17 @@ export function renderDashboardHtml({
       <div class="card-title">节点命名与广告清理设置</div>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 12px;">
         <div>
-          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">首节点 / 广告宣传替换名称：</div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">首节点名称 (将自动附带日期后2位)：</div>
           <input type="text" class="input-control" id="firstNameInput" value="${firstName}" style="width: 100%;">
+          <div style="font-size: 11px; color: var(--el-text-secondary); margin-top: 2px;">例如数据源为 02日，首节点将自动显示为：“${firstName}02”</div>
         </div>
         <div>
-          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 6px;">普通节点线路前缀：</div>
+          <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">普通节点线路前缀：</div>
           <input type="text" class="input-control" id="prefixInput" value="${prefix}" style="width: 100%;">
+          <div style="font-size: 11px; color: var(--el-text-secondary); margin-top: 2px;">后续所有节点前面都统一加上该前缀</div>
         </div>
       </div>
-      <button class="btn btn-primary" onclick="applyRenameOptions()">应用节点命名规则</button>
+      <button class="btn btn-primary" onclick="applyRenameOptions()">应用命名规则</button>
     </div>
 
     <!-- 4. 订阅地址获取卡片 -->
@@ -226,6 +235,12 @@ export function renderDashboardHtml({
       if (!val) return alert("请输入有效地址");
       const u = new URL(window.location.href);
       u.searchParams.set("source", val);
+      window.location.href = u.toString();
+    }
+    function applyInterval() {
+      const val = document.getElementById("intervalInput").value.trim();
+      const u = new URL(window.location.href);
+      if (val) u.searchParams.set("retry_interval", val);
       window.location.href = u.toString();
     }
     function applyRenameOptions() {
