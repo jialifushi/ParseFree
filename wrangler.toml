@@ -1,0 +1,7 @@
+name = "parsefree-worker"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# 可根据需要修改 workers 路由或配置
+# [vars]
+# DEFAULT_BASE_URL = "https://free.datiya.com"

@@ -1,0 +1,19 @@
+{
+  "name": "parsefree-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for parsing and transforming free node subscriptions",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test/run-test.js",
+    "build": "node scripts/build.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "keywords": ["cloudflare", "workers", "proxy", "subscription", "clash", "vmess"],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "wrangler": "^3.100.0"
+  }
+}
