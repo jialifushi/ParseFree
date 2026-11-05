@@ -50,7 +50,19 @@ async function runTests() {
   assert(html.includes("本次请求 (北京时间)"), "页面应包含本次请求北京时间展示");
   assert(html.includes("下一次请求 (北京时间)"), "页面应包含下一次请求北京时间展示");
   assert(html.includes("countdownBox"), "页面应包含倒计时元素 countdownBox");
-  console.log("   ✓ 重试间隔设置与实时倒计时/时间元数据展示正常");
+  assert(html.includes("Bark 配置"), "页面应包含 Bark 配置卡片");
+  assert(html.includes("barkServerInput"), "页面应包含 Bark 服务器地址输入框");
+  assert(html.includes("barkKeyInput"), "页面应包含 Bark 设备Key输入框");
+  assert(html.includes("测试通知"), "页面应包含 测试通知 按钮");
+  console.log("   ✓ 重试间隔设置、倒计时与 Bark 配置卡片展示正常");
+
+  // 3.1 测试 Bark API 接口 (/api/test-bark)
+  console.log("3.1 测试 Bark 接口 (/api/test-bark)...");
+  const resBarkEmpty = await worker.fetch(new Request("http://localhost:8787/api/test-bark", { method: "POST" }), {});
+  assert.strictEqual(resBarkEmpty.status, 400, "无 Key 时应返回 400");
+  const jsonBarkEmpty = await resBarkEmpty.json();
+  assert.strictEqual(jsonBarkEmpty.success, false);
+  console.log("   ✓ Bark API 校验与错误处理正常");
 
   // 4. 测试自定义首节点与前缀参数 (?first_name=定制官方节点&prefix=线路前缀-)
   console.log("4. 测试自定义首节点参数 (附带02日后缀)...");

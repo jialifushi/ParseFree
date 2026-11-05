@@ -10,6 +10,7 @@ import {
   formatBeijingDateTime,
   computeTimingMeta
 } from "./utils.js";
+import { sendSuccessPush, sendAlertPush } from "./bark.js";
 
 export const DEFAULT_RETRY_INTERVAL_MINUTES = 10;
 
@@ -22,12 +23,21 @@ let memoryState = {
   content: "",         // 源订阅文本内容
   lastSuccessTime: 0,  // 最近一次成功获取的时间戳
   lastFailedTime: 0,   // 最近一次探测今日失败的时间戳
-  lastRequestTime: 0   // 最近一次请求/探测的时间戳
+  lastRequestTime: 0,  // 最近一次请求/探测的时间戳
+  dataVersion: 1,      // 数据版本号 (变更时使 CF 边缘缓存立即失效)
+  lastNotifiedSuccessDate: "", // 当天成功通知记录 (防重复推送)
+  lastAlertSlots: []   // 已发送未更新告警的时段 (如 ["20261106-9"])
 };
 
-/**
- * 封装返回数据，统一注入本次请求北京时间、下次请求时间与倒计时秒数
- */
+export function getCacheVersion() {
+  return memoryState.dataVersion || 1;
+}
+
+export function bumpCacheVersion() {
+  memoryState.dataVersion = Date.now();
+  return memoryState.dataVersion;
+}
+
 function buildReturnData(result, retryCooldownMs) {
   const nowMs = Date.now();
   memoryState.lastRequestTime = nowMs;
@@ -38,26 +48,16 @@ function buildReturnData(result, retryCooldownMs) {
     nowMs
   });
   return {
-    ...result,
-    lastRequestTime: nowMs,
-    lastRequestTimeStr: formatBeijingDateTime(nowMs),
-    nextRequestTime: timing.nextRequestTime,
-    nextRequestTimeStr: timing.nextRequestTimeStr,
-    countdownSeconds: timing.countdownSeconds
+    ...result, lastRequestTime: nowMs, lastRequestTimeStr: formatBeijingDateTime(nowMs),
+    nextRequestTime: timing.nextRequestTime, nextRequestTimeStr: timing.nextRequestTimeStr, countdownSeconds: timing.countdownSeconds
   };
 }
 
-/**
- * 根据日期和类型构造源地址
- */
 export function buildSourceUrl(dateStr, type = "clash", baseUrl = DEFAULT_BASE_URL) {
   const ext = type.toLowerCase() === "v2ray" ? "v2ray.txt" : "clash.yaml";
   return `${baseUrl}/uploads/${dateStr}-${ext}`;
 }
 
-/**
- * 从 KV 或环境变量中加载持久化配置
- */
 export async function getSavedConfig(env = {}) {
   const kv = env.PARSEFREE_KV || env.KV;
   if (kv && typeof kv.get === "function") {
@@ -67,26 +67,30 @@ export async function getSavedConfig(env = {}) {
     } catch (e) {}
   }
   return {
-    mode: env.SOURCE_MODE || "auto",
-    type: env.SOURCE_TYPE || "clash",
-    manualUrl: env.CUSTOM_SOURCE_URL || "",
-    retryInterval: Number(env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES
+    mode: env.SOURCE_MODE || "auto", type: env.SOURCE_TYPE || "clash", manualUrl: env.CUSTOM_SOURCE_URL || "",
+    retryInterval: Number(env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES,
+    barkServer: env.BARK_SERVER || "", barkKey: env.BARK_KEY || "",
+    notifySuccess: env.BARK_NOTIFY_SUCCESS !== "0", notifyAlert: env.BARK_NOTIFY_ALERT !== "0", notifyDevice: env.BARK_NOTIFY_DEVICE === "1"
   };
 }
 
-/**
- * 抓取指定 URL 并验证有效性
- */
+export async function saveConfig(env = {}, newConfig = {}) {
+  const kv = env.PARSEFREE_KV || env.KV;
+  if (kv && typeof kv.put === "function") {
+    const current = await getSavedConfig(env);
+    const updated = { ...current, ...newConfig };
+    await kv.put("PARSEFREE_CONFIG", JSON.stringify(updated));
+    return { success: true, config: updated };
+  }
+  return { success: false, error: "未绑定 KV 命名空间 (PARSEFREE_KV)" };
+}
+
 async function fetchValidContent(url) {
   try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "ClashforWindows/0.20.39", "Accept": "*/*" }
-    });
+    const res = await fetch(url, { headers: { "User-Agent": "ClashforWindows/0.20.39", "Accept": "*/*" } });
     if (res.ok) {
       const text = await res.text();
-      if (text && text.trim().length > 50) {
-        return text;
-      }
+      if (text && text.trim().length > 50) return text;
     }
   } catch (err) {}
   return null;
@@ -180,8 +184,16 @@ export async function resolveSubscriptionData({
         content,
         lastSuccessTime: Date.now(),
         lastFailedTime: 0,
-        lastRequestTime: Date.now()
+        lastRequestTime: Date.now(),
+        dataVersion: memoryState.dataVersion || 1,
+        lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate,
+        lastAlertSlots: memoryState.lastAlertSlots
       };
+      bumpCacheVersion();
+      if (memoryState.lastNotifiedSuccessDate !== todayStr) {
+        memoryState.lastNotifiedSuccessDate = todayStr;
+        sendSuccessPush({ todayStr, env, savedConfig }).catch(() => {});
+      }
       return buildReturnData({
         content,
         targetUrl: todayUrl,
@@ -212,63 +224,69 @@ export async function resolveSubscriptionData({
     }, retryCooldownMs);
   }
 
-  // E. 内存无数据时，向前回退探测前 1~3 天有效数据兜底
-  for (let offset = 1; offset <= 3; offset++) {
-    const pastDate = new Date(bjNow.getTime() - offset * 86400000);
-    const pastDateStr = formatDate(pastDate);
-
+  // E. 内存无数据时，向前回退探测前 1~7 天有效数据兜底
+  for (let offset = 1; offset <= 7; offset++) {
+    const pastDateStr = formatDate(new Date(bjNow.getTime() - offset * 86400000));
     for (const cType of candidateTypes) {
       const pastUrl = buildSourceUrl(pastDateStr, cType);
       const content = await fetchValidContent(pastUrl);
       if (content) {
         memoryState = {
-          date: pastDateStr,
-          type,
-          isTodayReady: false,
-          targetUrl: pastUrl,
-          content,
-          lastSuccessTime: Date.now(),
-          lastFailedTime: Date.now(),
-          lastRequestTime: Date.now()
+          date: pastDateStr, type, isTodayReady: false, targetUrl: pastUrl, content,
+          lastSuccessTime: Date.now(), lastFailedTime: Date.now(), lastRequestTime: Date.now(),
+          dataVersion: memoryState.dataVersion || 1,
+          lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate,
+          lastAlertSlots: memoryState.lastAlertSlots
         };
         return buildReturnData({
-          content,
-          targetUrl: pastUrl,
-          sourceDate: pastDateStr,
-          isToday: false,
-          mode: "auto",
-          type,
-          retryMinutes,
+          content, targetUrl: pastUrl, sourceDate: pastDateStr, isToday: false, mode: "auto", type, retryMinutes,
           statusMsg: `已自动回退使用 ${pastDateStr} 最新有效数据`
         }, retryCooldownMs);
       }
     }
   }
 
-  throw new Error(`无法获取可用节点数据，探测今日 [${todayStr}] 及前 3 日源均无有效响应。`);
+  throw new Error(`无法获取可用节点数据，探测今日 [${todayStr}] 及前 7 日源均无有效响应。`);
 }
 
 /**
  * 定时任务 (Cron Trigger) 处理函数
  * 遵循重试间隔限制，今日一旦成功获取立即停止探测
+ * 支持 09:00 / 12:00 / 18:00 固定时段未发布告警推送
  */
 export async function handleScheduledTask(env = {}) {
   const bjNow = getBeijingDate();
   const todayStr = formatDate(bjNow);
+  const bjHour = bjNow.getHours();
+  const savedConfig = await getSavedConfig(env);
 
   if (memoryState.isTodayReady && memoryState.date === todayStr) {
     console.log(`[Cron] 今日数据已锁定 [${todayStr}]，停止探测。`);
     return;
   }
 
-  const savedConfig = await getSavedConfig(env);
+  // 9点 / 12点 / 18点未发布自动告警推送
+  if ([9, 12, 18].includes(bjHour) && !memoryState.isTodayReady) {
+    const slotKey = `${todayStr}-${bjHour}`;
+    if (!memoryState.lastAlertSlots.includes(slotKey)) {
+      memoryState.lastAlertSlots.push(slotKey);
+      if (memoryState.lastAlertSlots.length > 20) memoryState.lastAlertSlots.shift();
+      sendAlertPush({
+        hour: bjHour,
+        todayStr,
+        fallbackDate: memoryState.date,
+        retryMinutes: savedConfig.retryInterval,
+        env,
+        savedConfig
+      }).catch(() => {});
+    }
+  }
+
   const retryCooldownMs = (savedConfig.retryInterval || DEFAULT_RETRY_INTERVAL_MINUTES) * 60 * 1000;
   if (memoryState.lastFailedTime > 0 && Date.now() - memoryState.lastFailedTime < retryCooldownMs) {
-    console.log(`[Cron] 尚在探测失败重试间隔内，暂不发起探测。`);
     return;
   }
 
-  console.log(`[Cron] 间隔期已满，开始探测今日新源 [${todayStr}]...`);
   try {
     await resolveSubscriptionData({ forceRefresh: true, env });
   } catch (err) {

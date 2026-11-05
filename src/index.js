@@ -7,8 +7,9 @@ import { parseSubscription } from "./parser.js";
 import { toBase64 } from "./utils.js";
 import { renderDashboardHtml } from "./ui.js";
 import { verifyAuth, buildAuthRequiredResponse } from "./auth.js";
-import { resolveSubscriptionData, handleScheduledTask } from "./manager.js";
+import { resolveSubscriptionData, handleScheduledTask, getSavedConfig, saveConfig, getCacheVersion } from "./manager.js";
 import { processAndRenameNodes, DEFAULT_FIRST_NODE_NAME, DEFAULT_NODE_PREFIX } from "./renamer.js";
+import { sendBarkNotification, sendClientFetchPush } from "./bark.js";
 
 const CLIENT_UA_PATTERNS = [
   "clash", "v2ray", "shadowrocket", "quantumult",
@@ -35,6 +36,28 @@ export default {
       return buildAuthRequiredResponse();
     }
 
+    // 1.1 Bark 配置测试与保存 API 路由
+    if (pathname === "/api/test-bark") {
+      let bodyJson = {};
+      if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
+      const saved = await getSavedConfig(env);
+      const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
+      const k = bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "";
+      const res = await sendBarkNotification({
+        server: srv, key: k,
+        title: "【ParseFree】Bark 推送服务配置测试",
+        body: `🎉 恭喜！Bark 推送服务已成功连接，当前配置生效正常。\n测试时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+        group: "ParseFree"
+      });
+      return new Response(JSON.stringify(res), { status: res.success ? 200 : 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+    }
+
+    if (pathname === "/api/save-bark" && request.method === "POST") {
+      const bodyJson = await request.json().catch(() => ({}));
+      const res = await saveConfig(env, bodyJson);
+      return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers: { "Content-Type": "application/json; charset=utf-8" } });
+    }
+
     // 2. 提取请求参数
     const requestedSource = searchParams.get("source") || searchParams.get("url") || "";
     const requestedType = searchParams.get("type") || ""; // clash | v2ray
@@ -48,10 +71,11 @@ export default {
     const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
     const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
 
-    // 3. 边缘缓存处理 (注入版本号以保证代码更新后旧缓存立即失效)
+    // 3. 边缘缓存处理 (注入版本号与数据版本，定时任务更新或改版时旧缓存立即失效)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKeyUrl = new URL(url.toString());
     cacheKeyUrl.searchParams.set("_worker_v", WORKER_VERSION);
+    cacheKeyUrl.searchParams.set("_dv", String(getCacheVersion()));
     const cacheKey = new Request(cacheKeyUrl.toString(), request);
     if (cache && !forceRefresh && request.method === "GET") {
       const cached = await cache.match(cacheKey);
@@ -114,12 +138,15 @@ export default {
         };
 
         const response = new Response(bodyText, { status: 200, headers });
-        if (cache && ctx && typeof ctx.waitUntil === "function") {
-          const edgeCacheRes = new Response(bodyText, {
-            status: 200,
-            headers: { ...headers, "Cache-Control": "public, max-age=60" }
-          });
-          ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
+        if (ctx && typeof ctx.waitUntil === "function") {
+          if (cache) {
+            const edgeCacheRes = new Response(bodyText, { status: 200, headers: { ...headers, "Cache-Control": "public, max-age=60" } });
+            ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
+          }
+          const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "";
+          ctx.waitUntil(getSavedConfig(env).then(saved => sendClientFetchPush({
+            clientUa, clientIp, format: isB64 ? "Base64" : "明文", nodeCount: nodes.length, sourceDate: data.sourceDate, env, savedConfig: saved
+          })));
         }
         return response;
       }
@@ -139,6 +166,7 @@ export default {
 
       const subUrl = `${baseUrl}/sub${queryStr}`;
       const b64SubUrl = `${baseUrl}/sub${b64QueryStr}`;
+      const savedConfig = await getSavedConfig(env);
 
       const html = renderDashboardHtml({
         subUrl,
@@ -158,7 +186,8 @@ export default {
           nextRequestTimeStr: data.nextRequestTimeStr,
           countdownSeconds: data.countdownSeconds,
           isToday: data.isToday
-        }
+        },
+        barkConfig: savedConfig
       });
 
       const response = new Response(html, {

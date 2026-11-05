@@ -17,7 +17,8 @@ export function renderDashboardHtml({
   renameOptions = {},
   retryMinutes = 10,
   statusMsg = "",
-  timing = {}
+  timing = {},
+  barkConfig = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
@@ -29,6 +30,11 @@ export function renderDashboardHtml({
   const lastReqTime = timing.lastRequestTimeStr || "-";
   const nextReqTime = timing.nextRequestTimeStr || "-";
   const countdownSec = Number(timing.countdownSeconds) || 0;
+  const barkServer = barkConfig.barkServer || "";
+  const barkKey = barkConfig.barkKey || "";
+  const notifySuccess = barkConfig.notifySuccess !== false;
+  const notifyAlert = barkConfig.notifyAlert !== false;
+  const notifyDevice = Boolean(barkConfig.notifyDevice);
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -87,34 +93,13 @@ export function renderDashboardHtml({
     <div class="card">
       <div class="card-title">当前同步状态</div>
       <div class="meta-grid">
-        <div class="meta-item">
-          <div class="meta-label">已解析可用节点</div>
-          <div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">数据来源日期</div>
-          <div class="meta-value">${sourceDate} (${isAutoMode ? (isToday ? "今日已锁定" : "自动回退中") : "手动"})</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">探测与回退状态</div>
-          <div class="meta-value" style="font-size: 13px; color: ${isToday ? 'var(--el-color-success)' : 'var(--el-color-warning)'};">${statusMsg || (isToday ? "已成功锁定今日数据" : "自动回退使用最新有效数据")}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">安全鉴权状态</div>
-          <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启密码保护" : "公开访问"}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">本次请求 (北京时间)</div>
-          <div class="meta-value" style="font-size: 13px;">${lastReqTime}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">下一次请求 (北京时间)</div>
-          <div class="meta-value" style="font-size: 13px; color: var(--el-color-primary);">${nextReqTime} ${isToday ? "(明日0点)" : "(重试探测)"}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">距离下一次请求倒计时</div>
-          <div class="meta-value" id="countdownBox" style="font-size: 14px; font-weight: 700; color: var(--el-color-primary); font-family: monospace;">计算中...</div>
-        </div>
+        <div class="meta-item"><div class="meta-label">已解析可用节点</div><div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div></div>
+        <div class="meta-item"><div class="meta-label">数据来源日期</div><div class="meta-value">${sourceDate} (${isAutoMode ? (isToday ? "今日已锁定" : "自动回退中") : "手动"})</div></div>
+        <div class="meta-item"><div class="meta-label">探测与回退状态</div><div class="meta-value" style="font-size: 13px; color: ${isToday ? 'var(--el-color-success)' : 'var(--el-color-warning)'};">${statusMsg || (isToday ? "已成功锁定今日数据" : "自动回退使用最新有效数据")}</div></div>
+        <div class="meta-item"><div class="meta-label">安全鉴权状态</div><div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启密码保护" : "公开访问"}</div></div>
+        <div class="meta-item"><div class="meta-label">本次请求 (北京时间)</div><div class="meta-value" style="font-size: 13px;">${lastReqTime}</div></div>
+        <div class="meta-item"><div class="meta-label">下一次请求 (北京时间)</div><div class="meta-value" style="font-size: 13px; color: var(--el-color-primary);">${nextReqTime} ${isToday ? "(明日0点)" : "(重试探测)"}</div></div>
+        <div class="meta-item"><div class="meta-label">距离下一次请求倒计时</div><div class="meta-value" id="countdownBox" style="font-size: 14px; font-weight: 700; color: var(--el-color-primary); font-family: monospace;">计算中...</div></div>
       </div>
       <div class="meta-label">当前生效的上游源地址：</div>
       <div style="font-size: 13px; color: var(--el-text-regular); font-family: monospace; word-break: break-all; margin-top: 4px;">${targetUrl}</div>
@@ -191,7 +176,29 @@ export function renderDashboardHtml({
       </div>
     </div>
 
-    <!-- 5. 节点列表预览卡片 -->
+    <!-- 5. Bark 配置卡片 -->
+    <div class="card">
+      <div class="card-title">Bark 配置</div>
+      <div style="margin-bottom: 12px;">
+        <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址</div>
+        <input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;">
+      </div>
+      <div style="margin-bottom: 12px;">
+        <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key</div>
+        <input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="例如: fyvLzgWrWJKraAkhSa7EUc" style="width: 100%;">
+      </div>
+      <div style="margin-bottom: 14px; font-size: 13px;">
+        <label class="radio-label"><input type="checkbox" id="barkNotifySuccess" ${notifySuccess ? 'checked' : ''}> 每日更新成功推送</label>
+        <label class="radio-label"><input type="checkbox" id="barkNotifyAlert" ${notifyAlert ? 'checked' : ''}> 9/12/18点未发布告警</label>
+        <label class="radio-label"><input type="checkbox" id="barkNotifyDevice" ${notifyDevice ? 'checked' : ''}> 设备拉取节点通知 (5分钟防抖)</label>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-primary" onclick="saveBarkConfig()">保存配置</button>
+        <button class="btn btn-default" style="background: #5a626d; color: #fff;" onclick="testBarkNotification()">测试通知</button>
+      </div>
+    </div>
+
+    <!-- 6. 节点列表预览卡片 -->
     <div class="card">
       <div class="card-title">节点明细预览 (${nodeCount})</div>
       <div class="node-list">
@@ -213,10 +220,7 @@ export function renderDashboardHtml({
     function updateCountdown() {
       const el = document.getElementById("countdownBox");
       if (!el) return;
-      if (leftSec <= 0) {
-        el.innerText = "00分00秒 (已到期可探测)";
-        return;
-      }
+      if (leftSec <= 0) { el.innerText = "00分00秒 (已到期可探测)"; return; }
       const h = Math.floor(leftSec / 3600);
       const m = Math.floor((leftSec % 3600) / 60);
       const s = leftSec % 60;
@@ -241,40 +245,49 @@ export function renderDashboardHtml({
       u.searchParams.set("refresh", "1");
       window.location.href = u.toString();
     }
+    async function testBarkNotification() {
+      const server = document.getElementById("barkServerInput").value.trim();
+      const key = document.getElementById("barkKeyInput").value.trim();
+      if (!key) return alert("请先填写设备Key");
+      showToast("正在发送测试通知...");
+      try {
+        const res = await fetch("/api/test-bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, key }) });
+        const d = await res.json();
+        if (d.success) showToast("✓ 测试通知已成功送达 Bark"); else alert("测试失败: " + (d.error || "未知错误"));
+      } catch (e) { alert("网络异常: " + e.message); }
+    }
+    async function saveBarkConfig() {
+      const barkServer = document.getElementById("barkServerInput").value.trim();
+      const barkKey = document.getElementById("barkKeyInput").value.trim();
+      const notifySuccess = document.getElementById("barkNotifySuccess").checked;
+      const notifyAlert = document.getElementById("barkNotifyAlert").checked;
+      const notifyDevice = document.getElementById("barkNotifyDevice").checked;
+      try {
+        const res = await fetch("/api/save-bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice }) });
+        const d = await res.json();
+        if (d.success) showToast("✓ Bark 配置已成功保存至 KV"); else alert("保存提示: " + (d.error || "未绑定 KV，请直接在 CF 环境变量中设置"));
+      } catch (e) { alert("保存失败: " + e.message); }
+    }
     function switchMode(m) {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
-      if (m === "auto") {
-        const u = new URL(window.location.href);
-        u.searchParams.delete("source"); u.searchParams.delete("mode");
-        window.location.href = u.toString();
-      }
+      if (m === "auto") { const u = new URL(window.location.href); u.searchParams.delete("source"); u.searchParams.delete("mode"); window.location.href = u.toString(); }
     }
-    function switchType(t) {
-      const u = new URL(window.location.href);
-      u.searchParams.set("type", t);
-      window.location.href = u.toString();
-    }
+    function switchType(t) { const u = new URL(window.location.href); u.searchParams.set("type", t); window.location.href = u.toString(); }
     function applyManualUrl() {
       const val = document.getElementById("customInput").value.trim();
       if (!val) return alert("请输入有效地址");
-      const u = new URL(window.location.href);
-      u.searchParams.set("source", val);
-      window.location.href = u.toString();
+      const u = new URL(window.location.href); u.searchParams.set("source", val); window.location.href = u.toString();
     }
     function applyInterval() {
       const val = document.getElementById("intervalInput").value.trim();
-      const u = new URL(window.location.href);
-      if (val) u.searchParams.set("retry_interval", val);
-      window.location.href = u.toString();
+      const u = new URL(window.location.href); if (val) u.searchParams.set("retry_interval", val); window.location.href = u.toString();
     }
     function applyRenameOptions() {
       const fn = document.getElementById("firstNameInput").value.trim();
       const p = document.getElementById("prefixInput").value;
       const u = new URL(window.location.href);
-      if (fn) u.searchParams.set("first_name", fn);
-      else u.searchParams.delete("first_name");
-      if (p) u.searchParams.set("prefix", p);
-      else u.searchParams.delete("prefix");
+      if (fn) u.searchParams.set("first_name", fn); else u.searchParams.delete("first_name");
+      if (p) u.searchParams.set("prefix", p); else u.searchParams.delete("prefix");
       window.location.href = u.toString();
     }
   </script>

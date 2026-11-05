@@ -529,6 +529,7 @@ async function fetchSubscriptionData(customSourceUrl) {
 
 
 
+
 const DEFAULT_RETRY_INTERVAL_MINUTES = 10;
 
 // 内存中记录的最新状态缓存
@@ -540,12 +541,21 @@ let memoryState = {
   content: "",         // 源订阅文本内容
   lastSuccessTime: 0,  // 最近一次成功获取的时间戳
   lastFailedTime: 0,   // 最近一次探测今日失败的时间戳
-  lastRequestTime: 0   // 最近一次请求/探测的时间戳
+  lastRequestTime: 0,  // 最近一次请求/探测的时间戳
+  dataVersion: 1,      // 数据版本号 (变更时使 CF 边缘缓存立即失效)
+  lastNotifiedSuccessDate: "", // 当天成功通知记录 (防重复推送)
+  lastAlertSlots: []   // 已发送未更新告警的时段 (如 ["20261106-9"])
 };
 
-/**
- * 封装返回数据，统一注入本次请求北京时间、下次请求时间与倒计时秒数
- */
+function getCacheVersion() {
+  return memoryState.dataVersion || 1;
+}
+
+function bumpCacheVersion() {
+  memoryState.dataVersion = Date.now();
+  return memoryState.dataVersion;
+}
+
 function buildReturnData(result, retryCooldownMs) {
   const nowMs = Date.now();
   memoryState.lastRequestTime = nowMs;
@@ -556,26 +566,16 @@ function buildReturnData(result, retryCooldownMs) {
     nowMs
   });
   return {
-    ...result,
-    lastRequestTime: nowMs,
-    lastRequestTimeStr: formatBeijingDateTime(nowMs),
-    nextRequestTime: timing.nextRequestTime,
-    nextRequestTimeStr: timing.nextRequestTimeStr,
-    countdownSeconds: timing.countdownSeconds
+    ...result, lastRequestTime: nowMs, lastRequestTimeStr: formatBeijingDateTime(nowMs),
+    nextRequestTime: timing.nextRequestTime, nextRequestTimeStr: timing.nextRequestTimeStr, countdownSeconds: timing.countdownSeconds
   };
 }
 
-/**
- * 根据日期和类型构造源地址
- */
 function buildSourceUrl(dateStr, type = "clash", baseUrl = DEFAULT_BASE_URL) {
   const ext = type.toLowerCase() === "v2ray" ? "v2ray.txt" : "clash.yaml";
   return `${baseUrl}/uploads/${dateStr}-${ext}`;
 }
 
-/**
- * 从 KV 或环境变量中加载持久化配置
- */
 async function getSavedConfig(env = {}) {
   const kv = env.PARSEFREE_KV || env.KV;
   if (kv && typeof kv.get === "function") {
@@ -585,26 +585,30 @@ async function getSavedConfig(env = {}) {
     } catch (e) {}
   }
   return {
-    mode: env.SOURCE_MODE || "auto",
-    type: env.SOURCE_TYPE || "clash",
-    manualUrl: env.CUSTOM_SOURCE_URL || "",
-    retryInterval: Number(env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES
+    mode: env.SOURCE_MODE || "auto", type: env.SOURCE_TYPE || "clash", manualUrl: env.CUSTOM_SOURCE_URL || "",
+    retryInterval: Number(env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES,
+    barkServer: env.BARK_SERVER || "", barkKey: env.BARK_KEY || "",
+    notifySuccess: env.BARK_NOTIFY_SUCCESS !== "0", notifyAlert: env.BARK_NOTIFY_ALERT !== "0", notifyDevice: env.BARK_NOTIFY_DEVICE === "1"
   };
 }
 
-/**
- * 抓取指定 URL 并验证有效性
- */
+async function saveConfig(env = {}, newConfig = {}) {
+  const kv = env.PARSEFREE_KV || env.KV;
+  if (kv && typeof kv.put === "function") {
+    const current = await getSavedConfig(env);
+    const updated = { ...current, ...newConfig };
+    await kv.put("PARSEFREE_CONFIG", JSON.stringify(updated));
+    return { success: true, config: updated };
+  }
+  return { success: false, error: "未绑定 KV 命名空间 (PARSEFREE_KV)" };
+}
+
 async function fetchValidContent(url) {
   try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": "ClashforWindows/0.20.39", "Accept": "*/*" }
-    });
+    const res = await fetch(url, { headers: { "User-Agent": "ClashforWindows/0.20.39", "Accept": "*/*" } });
     if (res.ok) {
       const text = await res.text();
-      if (text && text.trim().length > 50) {
-        return text;
-      }
+      if (text && text.trim().length > 50) return text;
     }
   } catch (err) {}
   return null;
@@ -698,8 +702,16 @@ async function resolveSubscriptionData({
         content,
         lastSuccessTime: Date.now(),
         lastFailedTime: 0,
-        lastRequestTime: Date.now()
+        lastRequestTime: Date.now(),
+        dataVersion: memoryState.dataVersion || 1,
+        lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate,
+        lastAlertSlots: memoryState.lastAlertSlots
       };
+      bumpCacheVersion();
+      if (memoryState.lastNotifiedSuccessDate !== todayStr) {
+        memoryState.lastNotifiedSuccessDate = todayStr;
+        sendSuccessPush({ todayStr, env, savedConfig }).catch(() => {});
+      }
       return buildReturnData({
         content,
         targetUrl: todayUrl,
@@ -730,63 +742,69 @@ async function resolveSubscriptionData({
     }, retryCooldownMs);
   }
 
-  // E. 内存无数据时，向前回退探测前 1~3 天有效数据兜底
-  for (let offset = 1; offset <= 3; offset++) {
-    const pastDate = new Date(bjNow.getTime() - offset * 86400000);
-    const pastDateStr = formatDate(pastDate);
-
+  // E. 内存无数据时，向前回退探测前 1~7 天有效数据兜底
+  for (let offset = 1; offset <= 7; offset++) {
+    const pastDateStr = formatDate(new Date(bjNow.getTime() - offset * 86400000));
     for (const cType of candidateTypes) {
       const pastUrl = buildSourceUrl(pastDateStr, cType);
       const content = await fetchValidContent(pastUrl);
       if (content) {
         memoryState = {
-          date: pastDateStr,
-          type,
-          isTodayReady: false,
-          targetUrl: pastUrl,
-          content,
-          lastSuccessTime: Date.now(),
-          lastFailedTime: Date.now(),
-          lastRequestTime: Date.now()
+          date: pastDateStr, type, isTodayReady: false, targetUrl: pastUrl, content,
+          lastSuccessTime: Date.now(), lastFailedTime: Date.now(), lastRequestTime: Date.now(),
+          dataVersion: memoryState.dataVersion || 1,
+          lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate,
+          lastAlertSlots: memoryState.lastAlertSlots
         };
         return buildReturnData({
-          content,
-          targetUrl: pastUrl,
-          sourceDate: pastDateStr,
-          isToday: false,
-          mode: "auto",
-          type,
-          retryMinutes,
+          content, targetUrl: pastUrl, sourceDate: pastDateStr, isToday: false, mode: "auto", type, retryMinutes,
           statusMsg: `已自动回退使用 ${pastDateStr} 最新有效数据`
         }, retryCooldownMs);
       }
     }
   }
 
-  throw new Error(`无法获取可用节点数据，探测今日 [${todayStr}] 及前 3 日源均无有效响应。`);
+  throw new Error(`无法获取可用节点数据，探测今日 [${todayStr}] 及前 7 日源均无有效响应。`);
 }
 
 /**
  * 定时任务 (Cron Trigger) 处理函数
  * 遵循重试间隔限制，今日一旦成功获取立即停止探测
+ * 支持 09:00 / 12:00 / 18:00 固定时段未发布告警推送
  */
 async function handleScheduledTask(env = {}) {
   const bjNow = getBeijingDate();
   const todayStr = formatDate(bjNow);
+  const bjHour = bjNow.getHours();
+  const savedConfig = await getSavedConfig(env);
 
   if (memoryState.isTodayReady && memoryState.date === todayStr) {
     console.log(`[Cron] 今日数据已锁定 [${todayStr}]，停止探测。`);
     return;
   }
 
-  const savedConfig = await getSavedConfig(env);
+  // 9点 / 12点 / 18点未发布自动告警推送
+  if ([9, 12, 18].includes(bjHour) && !memoryState.isTodayReady) {
+    const slotKey = `${todayStr}-${bjHour}`;
+    if (!memoryState.lastAlertSlots.includes(slotKey)) {
+      memoryState.lastAlertSlots.push(slotKey);
+      if (memoryState.lastAlertSlots.length > 20) memoryState.lastAlertSlots.shift();
+      sendAlertPush({
+        hour: bjHour,
+        todayStr,
+        fallbackDate: memoryState.date,
+        retryMinutes: savedConfig.retryInterval,
+        env,
+        savedConfig
+      }).catch(() => {});
+    }
+  }
+
   const retryCooldownMs = (savedConfig.retryInterval || DEFAULT_RETRY_INTERVAL_MINUTES) * 60 * 1000;
   if (memoryState.lastFailedTime > 0 && Date.now() - memoryState.lastFailedTime < retryCooldownMs) {
-    console.log(`[Cron] 尚在探测失败重试间隔内，暂不发起探测。`);
     return;
   }
 
-  console.log(`[Cron] 间隔期已满，开始探测今日新源 [${todayStr}]...`);
   try {
     await resolveSubscriptionData({ forceRefresh: true, env });
   } catch (err) {
@@ -1053,7 +1071,8 @@ function renderDashboardHtml({
   renameOptions = {},
   retryMinutes = 10,
   statusMsg = "",
-  timing = {}
+  timing = {},
+  barkConfig = {}
 }) {
   const nodeCount = nodes.length;
   const escapedNodes = JSON.stringify(nodes);
@@ -1065,6 +1084,11 @@ function renderDashboardHtml({
   const lastReqTime = timing.lastRequestTimeStr || "-";
   const nextReqTime = timing.nextRequestTimeStr || "-";
   const countdownSec = Number(timing.countdownSeconds) || 0;
+  const barkServer = barkConfig.barkServer || "";
+  const barkKey = barkConfig.barkKey || "";
+  const notifySuccess = barkConfig.notifySuccess !== false;
+  const notifyAlert = barkConfig.notifyAlert !== false;
+  const notifyDevice = Boolean(barkConfig.notifyDevice);
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1123,34 +1147,13 @@ function renderDashboardHtml({
     <div class="card">
       <div class="card-title">当前同步状态</div>
       <div class="meta-grid">
-        <div class="meta-item">
-          <div class="meta-label">已解析可用节点</div>
-          <div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">数据来源日期</div>
-          <div class="meta-value">${sourceDate} (${isAutoMode ? (isToday ? "今日已锁定" : "自动回退中") : "手动"})</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">探测与回退状态</div>
-          <div class="meta-value" style="font-size: 13px; color: ${isToday ? 'var(--el-color-success)' : 'var(--el-color-warning)'};">${statusMsg || (isToday ? "已成功锁定今日数据" : "自动回退使用最新有效数据")}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">安全鉴权状态</div>
-          <div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启密码保护" : "公开访问"}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">本次请求 (北京时间)</div>
-          <div class="meta-value" style="font-size: 13px;">${lastReqTime}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">下一次请求 (北京时间)</div>
-          <div class="meta-value" style="font-size: 13px; color: var(--el-color-primary);">${nextReqTime} ${isToday ? "(明日0点)" : "(重试探测)"}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">距离下一次请求倒计时</div>
-          <div class="meta-value" id="countdownBox" style="font-size: 14px; font-weight: 700; color: var(--el-color-primary); font-family: monospace;">计算中...</div>
-        </div>
+        <div class="meta-item"><div class="meta-label">已解析可用节点</div><div class="meta-value" style="color: var(--el-color-success);">${nodeCount} 个</div></div>
+        <div class="meta-item"><div class="meta-label">数据来源日期</div><div class="meta-value">${sourceDate} (${isAutoMode ? (isToday ? "今日已锁定" : "自动回退中") : "手动"})</div></div>
+        <div class="meta-item"><div class="meta-label">探测与回退状态</div><div class="meta-value" style="font-size: 13px; color: ${isToday ? 'var(--el-color-success)' : 'var(--el-color-warning)'};">${statusMsg || (isToday ? "已成功锁定今日数据" : "自动回退使用最新有效数据")}</div></div>
+        <div class="meta-item"><div class="meta-label">安全鉴权状态</div><div class="meta-value" style="color: ${isProtected ? 'var(--el-color-success)' : 'var(--el-color-info)'};">${isProtected ? "已开启密码保护" : "公开访问"}</div></div>
+        <div class="meta-item"><div class="meta-label">本次请求 (北京时间)</div><div class="meta-value" style="font-size: 13px;">${lastReqTime}</div></div>
+        <div class="meta-item"><div class="meta-label">下一次请求 (北京时间)</div><div class="meta-value" style="font-size: 13px; color: var(--el-color-primary);">${nextReqTime} ${isToday ? "(明日0点)" : "(重试探测)"}</div></div>
+        <div class="meta-item"><div class="meta-label">距离下一次请求倒计时</div><div class="meta-value" id="countdownBox" style="font-size: 14px; font-weight: 700; color: var(--el-color-primary); font-family: monospace;">计算中...</div></div>
       </div>
       <div class="meta-label">当前生效的上游源地址：</div>
       <div style="font-size: 13px; color: var(--el-text-regular); font-family: monospace; word-break: break-all; margin-top: 4px;">${targetUrl}</div>
@@ -1227,7 +1230,29 @@ function renderDashboardHtml({
       </div>
     </div>
 
-    <!-- 5. 节点列表预览卡片 -->
+    <!-- 5. Bark 配置卡片 -->
+    <div class="card">
+      <div class="card-title">Bark 配置</div>
+      <div style="margin-bottom: 12px;">
+        <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址</div>
+        <input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;">
+      </div>
+      <div style="margin-bottom: 12px;">
+        <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key</div>
+        <input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="例如: fyvLzgWrWJKraAkhSa7EUc" style="width: 100%;">
+      </div>
+      <div style="margin-bottom: 14px; font-size: 13px;">
+        <label class="radio-label"><input type="checkbox" id="barkNotifySuccess" ${notifySuccess ? 'checked' : ''}> 每日更新成功推送</label>
+        <label class="radio-label"><input type="checkbox" id="barkNotifyAlert" ${notifyAlert ? 'checked' : ''}> 9/12/18点未发布告警</label>
+        <label class="radio-label"><input type="checkbox" id="barkNotifyDevice" ${notifyDevice ? 'checked' : ''}> 设备拉取节点通知 (5分钟防抖)</label>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-primary" onclick="saveBarkConfig()">保存配置</button>
+        <button class="btn btn-default" style="background: #5a626d; color: #fff;" onclick="testBarkNotification()">测试通知</button>
+      </div>
+    </div>
+
+    <!-- 6. 节点列表预览卡片 -->
     <div class="card">
       <div class="card-title">节点明细预览 (${nodeCount})</div>
       <div class="node-list">
@@ -1249,10 +1274,7 @@ function renderDashboardHtml({
     function updateCountdown() {
       const el = document.getElementById("countdownBox");
       if (!el) return;
-      if (leftSec <= 0) {
-        el.innerText = "00分00秒 (已到期可探测)";
-        return;
-      }
+      if (leftSec <= 0) { el.innerText = "00分00秒 (已到期可探测)"; return; }
       const h = Math.floor(leftSec / 3600);
       const m = Math.floor((leftSec % 3600) / 60);
       const s = leftSec % 60;
@@ -1277,40 +1299,49 @@ function renderDashboardHtml({
       u.searchParams.set("refresh", "1");
       window.location.href = u.toString();
     }
+    async function testBarkNotification() {
+      const server = document.getElementById("barkServerInput").value.trim();
+      const key = document.getElementById("barkKeyInput").value.trim();
+      if (!key) return alert("请先填写设备Key");
+      showToast("正在发送测试通知...");
+      try {
+        const res = await fetch("/api/test-bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, key }) });
+        const d = await res.json();
+        if (d.success) showToast("✓ 测试通知已成功送达 Bark"); else alert("测试失败: " + (d.error || "未知错误"));
+      } catch (e) { alert("网络异常: " + e.message); }
+    }
+    async function saveBarkConfig() {
+      const barkServer = document.getElementById("barkServerInput").value.trim();
+      const barkKey = document.getElementById("barkKeyInput").value.trim();
+      const notifySuccess = document.getElementById("barkNotifySuccess").checked;
+      const notifyAlert = document.getElementById("barkNotifyAlert").checked;
+      const notifyDevice = document.getElementById("barkNotifyDevice").checked;
+      try {
+        const res = await fetch("/api/save-bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice }) });
+        const d = await res.json();
+        if (d.success) showToast("✓ Bark 配置已成功保存至 KV"); else alert("保存提示: " + (d.error || "未绑定 KV，请直接在 CF 环境变量中设置"));
+      } catch (e) { alert("保存失败: " + e.message); }
+    }
     function switchMode(m) {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
-      if (m === "auto") {
-        const u = new URL(window.location.href);
-        u.searchParams.delete("source"); u.searchParams.delete("mode");
-        window.location.href = u.toString();
-      }
+      if (m === "auto") { const u = new URL(window.location.href); u.searchParams.delete("source"); u.searchParams.delete("mode"); window.location.href = u.toString(); }
     }
-    function switchType(t) {
-      const u = new URL(window.location.href);
-      u.searchParams.set("type", t);
-      window.location.href = u.toString();
-    }
+    function switchType(t) { const u = new URL(window.location.href); u.searchParams.set("type", t); window.location.href = u.toString(); }
     function applyManualUrl() {
       const val = document.getElementById("customInput").value.trim();
       if (!val) return alert("请输入有效地址");
-      const u = new URL(window.location.href);
-      u.searchParams.set("source", val);
-      window.location.href = u.toString();
+      const u = new URL(window.location.href); u.searchParams.set("source", val); window.location.href = u.toString();
     }
     function applyInterval() {
       const val = document.getElementById("intervalInput").value.trim();
-      const u = new URL(window.location.href);
-      if (val) u.searchParams.set("retry_interval", val);
-      window.location.href = u.toString();
+      const u = new URL(window.location.href); if (val) u.searchParams.set("retry_interval", val); window.location.href = u.toString();
     }
     function applyRenameOptions() {
       const fn = document.getElementById("firstNameInput").value.trim();
       const p = document.getElementById("prefixInput").value;
       const u = new URL(window.location.href);
-      if (fn) u.searchParams.set("first_name", fn);
-      else u.searchParams.delete("first_name");
-      if (p) u.searchParams.set("prefix", p);
-      else u.searchParams.delete("prefix");
+      if (fn) u.searchParams.set("first_name", fn); else u.searchParams.delete("first_name");
+      if (p) u.searchParams.set("prefix", p); else u.searchParams.delete("prefix");
       window.location.href = u.toString();
     }
   </script>
@@ -1323,6 +1354,7 @@ function renderDashboardHtml({
  * Cloudflare Worker 主入口
  * 支持 HTTP 请求路由处理与 Cron 定时事件监听 (scheduled)
  */
+
 
 
 
@@ -1356,6 +1388,28 @@ export default {
       return buildAuthRequiredResponse();
     }
 
+    // 1.1 Bark 配置测试与保存 API 路由
+    if (pathname === "/api/test-bark") {
+      let bodyJson = {};
+      if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
+      const saved = await getSavedConfig(env);
+      const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
+      const k = bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "";
+      const res = await sendBarkNotification({
+        server: srv, key: k,
+        title: "【ParseFree】Bark 推送服务配置测试",
+        body: `🎉 恭喜！Bark 推送服务已成功连接，当前配置生效正常。\n测试时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+        group: "ParseFree"
+      });
+      return new Response(JSON.stringify(res), { status: res.success ? 200 : 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+    }
+
+    if (pathname === "/api/save-bark" && request.method === "POST") {
+      const bodyJson = await request.json().catch(() => ({}));
+      const res = await saveConfig(env, bodyJson);
+      return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers: { "Content-Type": "application/json; charset=utf-8" } });
+    }
+
     // 2. 提取请求参数
     const requestedSource = searchParams.get("source") || searchParams.get("url") || "";
     const requestedType = searchParams.get("type") || ""; // clash | v2ray
@@ -1369,10 +1423,11 @@ export default {
     const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
     const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
 
-    // 3. 边缘缓存处理 (注入版本号以保证代码更新后旧缓存立即失效)
+    // 3. 边缘缓存处理 (注入版本号与数据版本，定时任务更新或改版时旧缓存立即失效)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKeyUrl = new URL(url.toString());
     cacheKeyUrl.searchParams.set("_worker_v", WORKER_VERSION);
+    cacheKeyUrl.searchParams.set("_dv", String(getCacheVersion()));
     const cacheKey = new Request(cacheKeyUrl.toString(), request);
     if (cache && !forceRefresh && request.method === "GET") {
       const cached = await cache.match(cacheKey);
@@ -1435,12 +1490,15 @@ export default {
         };
 
         const response = new Response(bodyText, { status: 200, headers });
-        if (cache && ctx && typeof ctx.waitUntil === "function") {
-          const edgeCacheRes = new Response(bodyText, {
-            status: 200,
-            headers: { ...headers, "Cache-Control": "public, max-age=60" }
-          });
-          ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
+        if (ctx && typeof ctx.waitUntil === "function") {
+          if (cache) {
+            const edgeCacheRes = new Response(bodyText, { status: 200, headers: { ...headers, "Cache-Control": "public, max-age=60" } });
+            ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
+          }
+          const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "";
+          ctx.waitUntil(getSavedConfig(env).then(saved => sendClientFetchPush({
+            clientUa, clientIp, format: isB64 ? "Base64" : "明文", nodeCount: nodes.length, sourceDate: data.sourceDate, env, savedConfig: saved
+          })));
         }
         return response;
       }
@@ -1460,6 +1518,7 @@ export default {
 
       const subUrl = `${baseUrl}/sub${queryStr}`;
       const b64SubUrl = `${baseUrl}/sub${b64QueryStr}`;
+      const savedConfig = await getSavedConfig(env);
 
       const html = renderDashboardHtml({
         subUrl,
@@ -1479,7 +1538,8 @@ export default {
           nextRequestTimeStr: data.nextRequestTimeStr,
           countdownSeconds: data.countdownSeconds,
           isToday: data.isToday
-        }
+        },
+        barkConfig: savedConfig
       });
 
       const response = new Response(html, {
