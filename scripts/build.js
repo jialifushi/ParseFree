@@ -10,6 +10,7 @@ const utilsCode = fs.readFileSync(path.join(rootDir, "src/utils.js"), "utf8");
 const formatterCode = fs.readFileSync(path.join(rootDir, "src/formatter.js"), "utf8");
 const parserCode = fs.readFileSync(path.join(rootDir, "src/parser.js"), "utf8");
 const scraperCode = fs.readFileSync(path.join(rootDir, "src/scraper.js"), "utf8");
+const barkCode = fs.readFileSync(path.join(rootDir, "src/bark.js"), "utf8");
 const managerCode = fs.readFileSync(path.join(rootDir, "src/manager.js"), "utf8");
 const renamerCode = fs.readFileSync(path.join(rootDir, "src/renamer.js"), "utf8");
 const uiCode = fs.readFileSync(path.join(rootDir, "src/ui.js"), "utf8");
@@ -27,6 +28,7 @@ const cleanedUtils = cleanModule(utilsCode);
 const cleanedFormatter = cleanModule(formatterCode);
 const cleanedParser = cleanModule(parserCode);
 const cleanedScraper = cleanModule(scraperCode);
+const cleanedBark = cleanModule(barkCode);
 const cleanedManager = cleanModule(managerCode);
 const cleanedRenamer = cleanModule(renamerCode);
 const cleanedUi = cleanModule(uiCode);
@@ -45,6 +47,7 @@ const bundleContent = `/**
  * 4. 支持手动编辑地址与自动日期模式切换，支持 Clash 与 V2Ray 两种源格式
  * 5. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
  * 6. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
+ * 7. 支持 Bark 通知推送服务（成功更新、未发布告警、设备拉取节流通知）
  */
 
 // ==================== 1. 通用工具模块 ====================
@@ -59,19 +62,22 @@ ${cleanedParser}
 // ==================== 4. 动态抓取与容错模块 ====================
 ${cleanedScraper}
 
-// ==================== 5. 订阅源与状态管理模块 ====================
+// ==================== 5. Bark 推送服务模块 ====================
+${cleanedBark}
+
+// ==================== 6. 订阅源与状态管理模块 ====================
 ${cleanedManager}
 
-// ==================== 6. 节点名称清洗与重命名模块 ====================
+// ==================== 7. 节点名称清洗与重命名模块 ====================
 ${cleanedRenamer}
 
-// ==================== 7. 账号密码鉴权模块 ====================
+// ==================== 8. 账号密码鉴权模块 ====================
 ${cleanedAuth}
 
-// ==================== 8. UI 渲染模块 ====================
+// ==================== 9. UI 渲染模块 ====================
 ${cleanedUi}
 
-// ==================== 9. Worker 主入口 ====================
+// ==================== 10. Worker 主入口 ====================
 ${cleanedIndex}
 `;
 

@@ -89,7 +89,13 @@ async function runTests() {
   assert(distLines[0].includes(encodeURIComponent("HOS Daily官方维护02")), "打包版首节点日后缀正常");
   const resRoot = await rootWorkerModule.fetch(new Request("http://localhost:8787/sub"), {});
   assert.strictEqual(resRoot.status, 200);
-  console.log("   ✓ 打包产物完全正常");
+
+  // 6.1 验证打包产物中的 Bark 接口
+  const resDistBark = await distWorkerModule.fetch(new Request("http://localhost:8787/api/test-bark", { method: "POST" }), {});
+  assert.strictEqual(resDistBark.status, 400);
+  const resRootBark = await rootWorkerModule.fetch(new Request("http://localhost:8787/api/test-bark", { method: "POST" }), {});
+  assert.strictEqual(resRootBark.status, 400);
+  console.log("   ✓ 打包产物完全正常 (含 Bark 模块完整性校验)");
 
   console.log("\n🎉 全部功能与回归测试全部通过！");
 }

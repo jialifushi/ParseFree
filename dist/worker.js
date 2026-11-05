@@ -10,6 +10,7 @@
  * 4. 支持手动编辑地址与自动日期模式切换，支持 Clash 与 V2Ray 两种源格式
  * 5. 支持账号密码访问保护（AUTH_PASSWORD / AUTH_USERNAME 环境变量）
  * 6. 支持浏览器 Web 可视化面板、通用明文订阅 (/sub)、Base64 订阅 (?b64=1)
+ * 7. 支持 Bark 通知推送服务（成功更新、未发布告警、设备拉取节流通知）
  */
 
 // ==================== 1. 通用工具模块 ====================
@@ -521,7 +522,169 @@ async function fetchSubscriptionData(customSourceUrl) {
   };
 }
 
-// ==================== 5. 订阅源与状态管理模块 ====================
+// ==================== 5. Bark 推送服务模块 ====================
+/**
+ * Bark 推送服务模块
+ * 支持每日更新成功通知、9/12/18点未发布告警与客户端拉取通知 (带 5 分钟防抖节流)
+ */
+
+const DEFAULT_BARK_SERVER = "https://api.day.app";
+const DEFAULT_TITLE_PREFIX = "【ParseFree】";
+
+// 内存中记录的客户端拉取节流缓存: Map<IP+UA, timestamp>
+const clientFetchThrottleMap = new Map();
+
+/**
+ * 获取生效的 Bark 配置
+ */
+function getBarkConfig(env = {}, kvConfig = {}) {
+  const server = (kvConfig.barkServer || env.BARK_SERVER || DEFAULT_BARK_SERVER).replace(/\/+$/, "");
+  const key = (kvConfig.barkKey || env.BARK_KEY || "").trim();
+  const titlePrefix = kvConfig.titlePrefix || env.BARK_TITLE_PREFIX || DEFAULT_TITLE_PREFIX;
+  const notifySuccess = kvConfig.notifySuccess !== undefined ? Boolean(kvConfig.notifySuccess) : (env.BARK_NOTIFY_SUCCESS !== "0");
+  const notifyAlert = kvConfig.notifyAlert !== undefined ? Boolean(kvConfig.notifyAlert) : (env.BARK_NOTIFY_ALERT !== "0");
+  const notifyDevice = kvConfig.notifyDevice !== undefined ? Boolean(kvConfig.notifyDevice) : (env.BARK_NOTIFY_DEVICE === "1");
+  const throttleMinutes = Number(kvConfig.throttleMinutes || env.BARK_THROTTLE_MINUTES || 5);
+
+  return {
+    server,
+    key,
+    enabled: Boolean(key),
+    titlePrefix,
+    notifySuccess,
+    notifyAlert,
+    notifyDevice,
+    throttleMinutes
+  };
+}
+
+/**
+ * 发送 Bark 推送消息
+ */
+async function sendBarkNotification({
+  server = DEFAULT_BARK_SERVER,
+  key = "",
+  title = "ParseFree 通知",
+  body = "",
+  group = "ParseFree",
+  sound = "",
+  icon = "",
+  url = ""
+} = {}) {
+  if (!key) return { success: false, error: "未配置 Bark 设备 Key" };
+
+  const cleanServer = server.replace(/\/+$/, "");
+  const targetUrl = `${cleanServer}/${encodeURIComponent(key)}`;
+
+  const payload = {
+    title,
+    body,
+    group,
+    ...(sound ? { sound } : {}),
+    ...(icon ? { icon } : {}),
+    ...(url ? { url } : {})
+  };
+
+  try {
+    const res = await fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && (data.code === 200 || data.message === "success" || data.status === "success")) {
+      return { success: true, data };
+    }
+    return { success: false, status: res.status, error: data.message || `HTTP ${res.status}` };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * 设备拉取节点防抖节流检查
+ */
+function shouldThrottleClientFetch(clientKey, throttleMinutes = 5) {
+  const now = Date.now();
+  const lastTime = clientFetchThrottleMap.get(clientKey) || 0;
+  if (now - lastTime < throttleMinutes * 60 * 1000) {
+    return true; // 冷却中，应当节流
+  }
+  clientFetchThrottleMap.set(clientKey, now);
+  if (clientFetchThrottleMap.size > 200) {
+    for (const [k, t] of clientFetchThrottleMap.entries()) {
+      if (now - t > 3600000) clientFetchThrottleMap.delete(k);
+    }
+  }
+  return false;
+}
+
+/**
+ * 发送今日更新成功通知
+ */
+async function sendSuccessPush({ todayStr, env, savedConfig }) {
+  const cfg = getBarkConfig(env, savedConfig);
+  if (!cfg.enabled || !cfg.notifySuccess) return;
+  const dayPart = todayStr.slice(-2);
+  return sendBarkNotification({
+    server: cfg.server,
+    key: cfg.key,
+    title: `${cfg.titlePrefix} 今日节点更新成功 🚀`,
+    body: `已锁定今日（${todayStr}）节点数据。\n首节点附带日期标识【${dayPart}】\nCloudflare 边缘缓存已同步清理。`,
+    group: "ParseFree"
+  }).catch(() => {});
+}
+
+/**
+ * 发送 09:00 / 12:00 / 18:00 未发布告警通知
+ */
+async function sendAlertPush({ hour, todayStr, fallbackDate, retryMinutes = 10, env, savedConfig }) {
+  const cfg = getBarkConfig(env, savedConfig);
+  if (!cfg.enabled || !cfg.notifyAlert) return;
+  const hourStr = String(hour).padStart(2, "0");
+  return sendBarkNotification({
+    server: cfg.server,
+    key: cfg.key,
+    title: `${cfg.titlePrefix} 今日免费节点暂未发布告警 ⚠️`,
+    body: `${hourStr}:00 检测到今日（${todayStr}）免费节点尚未发布。\n已自动回退使用【${fallbackDate || '最新有效'}】数据。\n后台重试间隔: ${retryMinutes} 分钟。`,
+    group: "ParseFree"
+  }).catch(() => {});
+}
+
+/**
+ * 发送设备端拉取订阅通知 (带防刷节流)
+ */
+async function sendClientFetchPush({ clientUa = "", clientIp = "", format = "明文", nodeCount = 0, sourceDate = "", env, savedConfig }) {
+  const cfg = getBarkConfig(env, savedConfig);
+  if (!cfg.enabled || !cfg.notifyDevice) return;
+
+  const throttleKey = `${clientIp}_${clientUa.slice(0, 30)}`;
+  if (shouldThrottleClientFetch(throttleKey, cfg.throttleMinutes)) {
+    return; // 节流期内不发送
+  }
+
+  // 简要识别客户端名称
+  let clientName = "未知设备";
+  const ua = clientUa.toLowerCase();
+  if (ua.includes("shadowrocket")) clientName = "Shadowrocket (小火箭)";
+  else if (ua.includes("clash")) clientName = "Clash";
+  else if (ua.includes("v2ray")) clientName = "v2rayN";
+  else if (ua.includes("sing-box")) clientName = "sing-box";
+  else if (ua.includes("quantumult")) clientName = "Quantumult X";
+  else if (ua.includes("surge")) clientName = "Surge";
+  else if (ua.includes("curl") || ua.includes("wget")) clientName = "命令行 (cURL)";
+
+  return sendBarkNotification({
+    server: cfg.server,
+    key: cfg.key,
+    title: `${cfg.titlePrefix} 设备拉取节点通知 📱`,
+    body: `客户端：${clientName}\n格式：${format}\nIP：${clientIp || '未知'}\n下发节点数：${nodeCount} 个 (${sourceDate || '未知'})\n时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+    group: "ParseFree"
+  }).catch(() => {});
+}
+
+// ==================== 6. 订阅源与状态管理模块 ====================
 /**
  * 订阅源与每日更新状态管理模块
  * 支持自动日期递增、失败重试间隔退避、失败期间自动回退最新有效数据与成功后锁定停止机制
@@ -813,7 +976,7 @@ async function handleScheduledTask(env = {}) {
   }
 }
 
-// ==================== 6. 节点名称清洗与重命名模块 ====================
+// ==================== 7. 节点名称清洗与重命名模块 ====================
 /**
  * 节点名称清洗与自定义重命名模块
  * 1. 识别并清理源数据中的广告/宣传信息（如 "tg频道:@freenodedaily"），替换为指定的首节点名称
@@ -966,7 +1129,7 @@ function processAndRenameNodes(nodes = [], options = {}) {
   return nodes.map((nodeUri, idx) => renameUriNode(nodeUri, idx, options));
 }
 
-// ==================== 7. 账号密码鉴权模块 ====================
+// ==================== 8. 账号密码鉴权模块 ====================
 /**
  * 账号密码与访问鉴权模块
  * 支持环境变量配置：AUTH_USERNAME、AUTH_PASSWORD、AUTH_TOKEN
@@ -1052,7 +1215,7 @@ function buildAuthRequiredResponse() {
   );
 }
 
-// ==================== 8. UI 渲染模块 ====================
+// ==================== 9. UI 渲染模块 ====================
 /**
  * Web 控制台页面渲染模块
  * 遵循 Element Plus 企业级风格，简洁、专业、克制
@@ -1350,7 +1513,7 @@ function renderDashboardHtml({
 </html>`;
 }
 
-// ==================== 9. Worker 主入口 ====================
+// ==================== 10. Worker 主入口 ====================
 /**
  * Cloudflare Worker 主入口
  * 支持 HTTP 请求路由处理与 Cron 定时事件监听 (scheduled)
@@ -1396,31 +1559,39 @@ export default {
     }
 
     // 1.1 Bark 配置测试与保存 API 路由
-    if (pathname === "/api/test-bark") {
-      let bodyJson = {};
-      if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
-      const saved = await getSavedConfig(env);
-      const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
-      const k = (bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "").trim();
-      if (!k) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: "未检测到 Bark 设备 Key。排查建议：1. 直接在页面【设备Key】输入框粘贴后测试；2. 若在 Cloudflare 环境变量中添加了 BARK_KEY，需在 Deployments 重新部署(Redeploy)才能生效。"
-        }), { status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
-      }
-      const res = await sendBarkNotification({
-        server: srv, key: k,
-        title: "【ParseFree】Bark 推送服务配置测试",
-        body: `🎉 恭喜！Bark 推送服务已成功连接，当前配置生效正常。\n测试时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
-        group: "ParseFree"
-      });
-      return new Response(JSON.stringify(res), { status: res.success ? 200 : 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
-    }
+    if (pathname === "/api/test-bark" || pathname === "/api/save-bark") {
+      try {
+        if (pathname === "/api/test-bark") {
+          let bodyJson = {};
+          if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
+          const saved = await getSavedConfig(env);
+          const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
+          const k = (bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "").trim();
+          if (!k) {
+            return new Response(JSON.stringify({
+              success: false,
+              error: "未检测到 Bark 设备 Key。排查建议：1. 直接在页面【设备Key】输入框粘贴后测试；2. 若在 Cloudflare 环境变量中添加了 BARK_KEY，需在 Deployments 重新部署(Redeploy)才能生效。"
+            }), { status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+          }
+          const res = await sendBarkNotification({
+            server: srv, key: k,
+            title: "【ParseFree】Bark 推送服务配置测试",
+            body: `🎉 恭喜！Bark 推送服务已成功连接，当前配置生效正常。\n测试时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+            group: "ParseFree"
+          });
+          return new Response(JSON.stringify(res), { status: res.success ? 200 : 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+        }
 
-    if (pathname === "/api/save-bark" && request.method === "POST") {
-      const bodyJson = await request.json().catch(() => ({}));
-      const res = await saveConfig(env, bodyJson);
-      return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers: { "Content-Type": "application/json; charset=utf-8" } });
+        if (pathname === "/api/save-bark" && request.method === "POST") {
+          const bodyJson = await request.json().catch(() => ({}));
+          const res = await saveConfig(env, bodyJson);
+          return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers: { "Content-Type": "application/json; charset=utf-8" } });
+        }
+      } catch (apiErr) {
+        return new Response(JSON.stringify({ success: false, error: "接口服务异常: " + apiErr.message }), {
+          status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
     }
 
     // 2. 提取请求参数

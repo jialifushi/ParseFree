@@ -43,31 +43,39 @@ export default {
     }
 
     // 1.1 Bark 配置测试与保存 API 路由
-    if (pathname === "/api/test-bark") {
-      let bodyJson = {};
-      if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
-      const saved = await getSavedConfig(env);
-      const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
-      const k = (bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "").trim();
-      if (!k) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: "未检测到 Bark 设备 Key。排查建议：1. 直接在页面【设备Key】输入框粘贴后测试；2. 若在 Cloudflare 环境变量中添加了 BARK_KEY，需在 Deployments 重新部署(Redeploy)才能生效。"
-        }), { status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
-      }
-      const res = await sendBarkNotification({
-        server: srv, key: k,
-        title: "【ParseFree】Bark 推送服务配置测试",
-        body: `🎉 恭喜！Bark 推送服务已成功连接，当前配置生效正常。\n测试时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
-        group: "ParseFree"
-      });
-      return new Response(JSON.stringify(res), { status: res.success ? 200 : 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
-    }
+    if (pathname === "/api/test-bark" || pathname === "/api/save-bark") {
+      try {
+        if (pathname === "/api/test-bark") {
+          let bodyJson = {};
+          if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
+          const saved = await getSavedConfig(env);
+          const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
+          const k = (bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "").trim();
+          if (!k) {
+            return new Response(JSON.stringify({
+              success: false,
+              error: "未检测到 Bark 设备 Key。排查建议：1. 直接在页面【设备Key】输入框粘贴后测试；2. 若在 Cloudflare 环境变量中添加了 BARK_KEY，需在 Deployments 重新部署(Redeploy)才能生效。"
+            }), { status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+          }
+          const res = await sendBarkNotification({
+            server: srv, key: k,
+            title: "【ParseFree】Bark 推送服务配置测试",
+            body: `🎉 恭喜！Bark 推送服务已成功连接，当前配置生效正常。\n测试时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+            group: "ParseFree"
+          });
+          return new Response(JSON.stringify(res), { status: res.success ? 200 : 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+        }
 
-    if (pathname === "/api/save-bark" && request.method === "POST") {
-      const bodyJson = await request.json().catch(() => ({}));
-      const res = await saveConfig(env, bodyJson);
-      return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers: { "Content-Type": "application/json; charset=utf-8" } });
+        if (pathname === "/api/save-bark" && request.method === "POST") {
+          const bodyJson = await request.json().catch(() => ({}));
+          const res = await saveConfig(env, bodyJson);
+          return new Response(JSON.stringify(res), { status: res.success ? 200 : 500, headers: { "Content-Type": "application/json; charset=utf-8" } });
+        }
+      } catch (apiErr) {
+        return new Response(JSON.stringify({ success: false, error: "接口服务异常: " + apiErr.message }), {
+          status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
     }
 
     // 2. 提取请求参数
