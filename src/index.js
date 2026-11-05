@@ -33,6 +33,12 @@ export default {
     // 1. 访问鉴权校验（环境变量配置 AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN）
     const auth = verifyAuth(request, env);
     if (!auth.authenticated) {
+      if (pathname.startsWith("/api/")) {
+        return new Response(JSON.stringify({ success: false, error: "鉴权未通过: 请在请求中携带正确的 token 参数" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
       return buildAuthRequiredResponse();
     }
 

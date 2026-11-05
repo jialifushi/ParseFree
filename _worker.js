@@ -1209,17 +1209,11 @@ function renderDashboardHtml({
       <div class="card-title">客户端订阅链接</div>
       <div style="margin-bottom: 12px;">
         <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">1. Base64 订阅链接 (🔥 推荐小火箭 Shadowrocket / v2rayN 导入，全量同步覆盖备注)：</div>
-        <div class="input-group">
-          <input type="text" class="input-control" readonly id="b64SubInput" value="${b64SubUrl}">
-          <button class="btn btn-primary" onclick="copyText('${b64SubUrl}')">复制 Base64 订阅</button>
-        </div>
+        <div class="input-group"><input type="text" class="input-control" readonly id="b64SubInput" value="${b64SubUrl}"><button class="btn btn-primary" onclick="copyText('${b64SubUrl}')">复制 Base64 订阅</button></div>
       </div>
       <div style="margin-bottom: 12px;">
         <div style="font-size: 13px; font-weight: 500; margin-bottom: 6px;">2. 通用明文订阅链接 (单行 URI 格式，与 格式.txt 一致)：</div>
-        <div class="input-group">
-          <input type="text" class="input-control" readonly id="subInput" value="${subUrl}">
-          <button class="btn btn-default" onclick="copyText('${subUrl}')">复制明文链接</button>
-        </div>
+        <div class="input-group"><input type="text" class="input-control" readonly id="subInput" value="${subUrl}"><button class="btn btn-default" onclick="copyText('${subUrl}')">复制明文链接</button></div>
       </div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
         <button class="btn btn-primary" onclick="copyAllNodes()">一键复制全部 ${nodeCount} 个节点链接</button>
@@ -1233,14 +1227,8 @@ function renderDashboardHtml({
     <!-- 5. Bark 配置卡片 -->
     <div class="card">
       <div class="card-title">Bark 配置</div>
-      <div style="margin-bottom: 12px;">
-        <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址</div>
-        <input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;">
-      </div>
-      <div style="margin-bottom: 12px;">
-        <div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key</div>
-        <input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="例如: fyvLzgWrWJKraAkhSa7EUc" style="width: 100%;">
-      </div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="例如: fyvLzgWrWJKraAkhSa7EUc" style="width: 100%;"></div>
       <div style="margin-bottom: 14px; font-size: 13px;">
         <label class="radio-label"><input type="checkbox" id="barkNotifySuccess" ${notifySuccess ? 'checked' : ''}> 每日更新成功推送</label>
         <label class="radio-label"><input type="checkbox" id="barkNotifyAlert" ${notifyAlert ? 'checked' : ''}> 9/12/18点未发布告警</label>
@@ -1305,8 +1293,17 @@ function renderDashboardHtml({
       if (!key) return alert("请先填写设备Key");
       showToast("正在发送测试通知...");
       try {
-        const res = await fetch("/api/test-bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, key }) });
-        const d = await res.json();
+        const u = new URL("/api/test-bark", window.location.href);
+        new URL(window.location.href).searchParams.forEach((v, k) => u.searchParams.set(k, v));
+        const res = await fetch(u.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, key }) });
+        const text = await res.text();
+        let d = {};
+        try { d = JSON.parse(text); } catch(err) {
+          if (text.includes("<!DOCTYPE") || text.includes("<html")) {
+            return alert("接口返回了 HTML 页面。可能原因：Cloudflare 正在部署最新代码（通常需1-2分钟），请稍候刷新重试；或当前开启了密码保护，请确保网址带有 ?token=密码。");
+          }
+          return alert("接口响应异常: " + text.slice(0, 80));
+        }
         if (d.success) showToast("✓ 测试通知已成功送达 Bark"); else alert("测试失败: " + (d.error || "未知错误"));
       } catch (e) { alert("网络异常: " + e.message); }
     }
@@ -1317,9 +1314,13 @@ function renderDashboardHtml({
       const notifyAlert = document.getElementById("barkNotifyAlert").checked;
       const notifyDevice = document.getElementById("barkNotifyDevice").checked;
       try {
-        const res = await fetch("/api/save-bark", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice }) });
-        const d = await res.json();
-        if (d.success) showToast("✓ Bark 配置已成功保存至 KV"); else alert("保存提示: " + (d.error || "未绑定 KV，请直接在 CF 环境变量中设置"));
+        const u = new URL("/api/save-bark", window.location.href);
+        new URL(window.location.href).searchParams.forEach((v, k) => u.searchParams.set(k, v));
+        const res = await fetch(u.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice }) });
+        const text = await res.text();
+        let d = {};
+        try { d = JSON.parse(text); } catch(err) { return alert("接口未就绪，请等待 Cloudflare 部署完成或在环境变量中配置。"); }
+        if (d.success) showToast("✓ Bark 配置已成功保存至 KV"); else alert("保存提示: " + (d.error || "未绑定 KV，更推荐直接在 CF 环境变量中设置"));
       } catch (e) { alert("保存失败: " + e.message); }
     }
     function switchMode(m) {
@@ -1385,6 +1386,12 @@ export default {
     // 1. 访问鉴权校验（环境变量配置 AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN）
     const auth = verifyAuth(request, env);
     if (!auth.authenticated) {
+      if (pathname.startsWith("/api/")) {
+        return new Response(JSON.stringify({ success: false, error: "鉴权未通过: 请在请求中携带正确的 token 参数" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
       return buildAuthRequiredResponse();
     }
 
