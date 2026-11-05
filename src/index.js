@@ -48,7 +48,13 @@ export default {
       if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
       const saved = await getSavedConfig(env);
       const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
-      const k = bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "";
+      const k = (bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "").trim();
+      if (!k) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: "未检测到 Bark 设备 Key。排查建议：1. 直接在页面【设备Key】输入框粘贴后测试；2. 若在 Cloudflare 环境变量中添加了 BARK_KEY，需在 Deployments 重新部署(Redeploy)才能生效。"
+        }), { status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+      }
       const res = await sendBarkNotification({
         server: srv, key: k,
         title: "【ParseFree】Bark 推送服务配置测试",
@@ -200,13 +206,11 @@ export default {
         status: 200,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, max-age=300"
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0"
         }
       });
-
-      if (cache && ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(cache.put(cacheKey, response.clone()));
-      }
       return response;
 
     } catch (err) {

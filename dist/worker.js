@@ -577,18 +577,21 @@ function buildSourceUrl(dateStr, type = "clash", baseUrl = DEFAULT_BASE_URL) {
 }
 
 async function getSavedConfig(env = {}) {
+  let s = {};
   const kv = env.PARSEFREE_KV || env.KV;
   if (kv && typeof kv.get === "function") {
-    try {
-      const saved = await kv.get("PARSEFREE_CONFIG", { type: "json" });
-      if (saved) return saved;
-    } catch (e) {}
+    try { s = (await kv.get("PARSEFREE_CONFIG", { type: "json" })) || {}; } catch (e) {}
   }
   return {
-    mode: env.SOURCE_MODE || "auto", type: env.SOURCE_TYPE || "clash", manualUrl: env.CUSTOM_SOURCE_URL || "",
-    retryInterval: Number(env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES,
-    barkServer: env.BARK_SERVER || "", barkKey: env.BARK_KEY || "",
-    notifySuccess: env.BARK_NOTIFY_SUCCESS !== "0", notifyAlert: env.BARK_NOTIFY_ALERT !== "0", notifyDevice: env.BARK_NOTIFY_DEVICE === "1"
+    mode: s.mode || env.SOURCE_MODE || "auto",
+    type: s.type || env.SOURCE_TYPE || "clash",
+    manualUrl: s.manualUrl || env.CUSTOM_SOURCE_URL || "",
+    retryInterval: Number(s.retryInterval || env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES,
+    barkServer: s.barkServer || env.BARK_SERVER || "",
+    barkKey: s.barkKey || env.BARK_KEY || "",
+    notifySuccess: s.notifySuccess !== undefined ? Boolean(s.notifySuccess) : (env.BARK_NOTIFY_SUCCESS !== "0"),
+    notifyAlert: s.notifyAlert !== undefined ? Boolean(s.notifyAlert) : (env.BARK_NOTIFY_ALERT !== "0"),
+    notifyDevice: s.notifyDevice !== undefined ? Boolean(s.notifyDevice) : (env.BARK_NOTIFY_DEVICE === "1")
   };
 }
 
@@ -752,9 +755,7 @@ async function resolveSubscriptionData({
         memoryState = {
           date: pastDateStr, type, isTodayReady: false, targetUrl: pastUrl, content,
           lastSuccessTime: Date.now(), lastFailedTime: Date.now(), lastRequestTime: Date.now(),
-          dataVersion: memoryState.dataVersion || 1,
-          lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate,
-          lastAlertSlots: memoryState.lastAlertSlots
+          dataVersion: memoryState.dataVersion || 1, lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate, lastAlertSlots: memoryState.lastAlertSlots
         };
         return buildReturnData({
           content, targetUrl: pastUrl, sourceDate: pastDateStr, isToday: false, mode: "auto", type, retryMinutes,
@@ -1227,8 +1228,8 @@ function renderDashboardHtml({
     <!-- 5. Bark 配置卡片 -->
     <div class="card">
       <div class="card-title">Bark 配置</div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="例如: fyvLzgWrWJKraAkhSa7EUc" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址 ${barkServer ? '<span style="color:#67c23a;font-size:12px;">(已配置)</span>' : ''}</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key ${barkKey ? '<span style="color:#67c23a;font-size:12px;">(已检测到有效配置)</span>' : '<span style="color:#e6a23c;font-size:12px;">(未配置，可直接输入或在CF环境变量设置)</span>'}</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="输入 Bark 设备Key，留空则默认使用 CF 环境变量" style="width: 100%;"></div>
       <div style="margin-bottom: 14px; font-size: 13px;">
         <label class="radio-label"><input type="checkbox" id="barkNotifySuccess" ${notifySuccess ? 'checked' : ''}> 每日更新成功推送</label>
         <label class="radio-label"><input type="checkbox" id="barkNotifyAlert" ${notifyAlert ? 'checked' : ''}> 9/12/18点未发布告警</label>
@@ -1290,7 +1291,6 @@ function renderDashboardHtml({
     async function testBarkNotification() {
       const server = document.getElementById("barkServerInput").value.trim();
       const key = document.getElementById("barkKeyInput").value.trim();
-      if (!key) return alert("请先填写设备Key");
       showToast("正在发送测试通知...");
       try {
         const u = new URL("/api/test-bark", window.location.href);
@@ -1401,7 +1401,13 @@ export default {
       if (request.method === "POST") bodyJson = await request.json().catch(() => ({}));
       const saved = await getSavedConfig(env);
       const srv = bodyJson.server || searchParams.get("server") || saved.barkServer || env.BARK_SERVER || "https://api.day.app";
-      const k = bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "";
+      const k = (bodyJson.key || searchParams.get("key") || saved.barkKey || env.BARK_KEY || "").trim();
+      if (!k) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: "未检测到 Bark 设备 Key。排查建议：1. 直接在页面【设备Key】输入框粘贴后测试；2. 若在 Cloudflare 环境变量中添加了 BARK_KEY，需在 Deployments 重新部署(Redeploy)才能生效。"
+        }), { status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } });
+      }
       const res = await sendBarkNotification({
         server: srv, key: k,
         title: "【ParseFree】Bark 推送服务配置测试",
@@ -1553,13 +1559,11 @@ export default {
         status: 200,
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "public, max-age=300"
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0"
         }
       });
-
-      if (cache && ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(cache.put(cacheKey, response.clone()));
-      }
       return response;
 
     } catch (err) {

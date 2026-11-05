@@ -59,18 +59,21 @@ export function buildSourceUrl(dateStr, type = "clash", baseUrl = DEFAULT_BASE_U
 }
 
 export async function getSavedConfig(env = {}) {
+  let s = {};
   const kv = env.PARSEFREE_KV || env.KV;
   if (kv && typeof kv.get === "function") {
-    try {
-      const saved = await kv.get("PARSEFREE_CONFIG", { type: "json" });
-      if (saved) return saved;
-    } catch (e) {}
+    try { s = (await kv.get("PARSEFREE_CONFIG", { type: "json" })) || {}; } catch (e) {}
   }
   return {
-    mode: env.SOURCE_MODE || "auto", type: env.SOURCE_TYPE || "clash", manualUrl: env.CUSTOM_SOURCE_URL || "",
-    retryInterval: Number(env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES,
-    barkServer: env.BARK_SERVER || "", barkKey: env.BARK_KEY || "",
-    notifySuccess: env.BARK_NOTIFY_SUCCESS !== "0", notifyAlert: env.BARK_NOTIFY_ALERT !== "0", notifyDevice: env.BARK_NOTIFY_DEVICE === "1"
+    mode: s.mode || env.SOURCE_MODE || "auto",
+    type: s.type || env.SOURCE_TYPE || "clash",
+    manualUrl: s.manualUrl || env.CUSTOM_SOURCE_URL || "",
+    retryInterval: Number(s.retryInterval || env.RETRY_INTERVAL_MINUTES) || DEFAULT_RETRY_INTERVAL_MINUTES,
+    barkServer: s.barkServer || env.BARK_SERVER || "",
+    barkKey: s.barkKey || env.BARK_KEY || "",
+    notifySuccess: s.notifySuccess !== undefined ? Boolean(s.notifySuccess) : (env.BARK_NOTIFY_SUCCESS !== "0"),
+    notifyAlert: s.notifyAlert !== undefined ? Boolean(s.notifyAlert) : (env.BARK_NOTIFY_ALERT !== "0"),
+    notifyDevice: s.notifyDevice !== undefined ? Boolean(s.notifyDevice) : (env.BARK_NOTIFY_DEVICE === "1")
   };
 }
 
@@ -234,9 +237,7 @@ export async function resolveSubscriptionData({
         memoryState = {
           date: pastDateStr, type, isTodayReady: false, targetUrl: pastUrl, content,
           lastSuccessTime: Date.now(), lastFailedTime: Date.now(), lastRequestTime: Date.now(),
-          dataVersion: memoryState.dataVersion || 1,
-          lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate,
-          lastAlertSlots: memoryState.lastAlertSlots
+          dataVersion: memoryState.dataVersion || 1, lastNotifiedSuccessDate: memoryState.lastNotifiedSuccessDate, lastAlertSlots: memoryState.lastAlertSlots
         };
         return buildReturnData({
           content, targetUrl: pastUrl, sourceDate: pastDateStr, isToday: false, mode: "auto", type, retryMinutes,

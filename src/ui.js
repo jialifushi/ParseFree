@@ -173,8 +173,8 @@ export function renderDashboardHtml({
     <!-- 5. Bark 配置卡片 -->
     <div class="card">
       <div class="card-title">Bark 配置</div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="例如: fyvLzgWrWJKraAkhSa7EUc" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址 ${barkServer ? '<span style="color:#67c23a;font-size:12px;">(已配置)</span>' : ''}</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key ${barkKey ? '<span style="color:#67c23a;font-size:12px;">(已检测到有效配置)</span>' : '<span style="color:#e6a23c;font-size:12px;">(未配置，可直接输入或在CF环境变量设置)</span>'}</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="输入 Bark 设备Key，留空则默认使用 CF 环境变量" style="width: 100%;"></div>
       <div style="margin-bottom: 14px; font-size: 13px;">
         <label class="radio-label"><input type="checkbox" id="barkNotifySuccess" ${notifySuccess ? 'checked' : ''}> 每日更新成功推送</label>
         <label class="radio-label"><input type="checkbox" id="barkNotifyAlert" ${notifyAlert ? 'checked' : ''}> 9/12/18点未发布告警</label>
@@ -236,7 +236,6 @@ export function renderDashboardHtml({
     async function testBarkNotification() {
       const server = document.getElementById("barkServerInput").value.trim();
       const key = document.getElementById("barkKeyInput").value.trim();
-      if (!key) return alert("请先填写设备Key");
       showToast("正在发送测试通知...");
       try {
         const u = new URL("/api/test-bark", window.location.href);
