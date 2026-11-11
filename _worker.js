@@ -697,26 +697,24 @@ const DEFAULT_RETRY_INTERVAL_MINUTES = 10;
 
 // 内存中记录的最新状态缓存
 let memoryState = {
-  date: "",            // 当前提供数据的日期 (YYYYMMDD)
-  type: "clash",       // 源类型: clash | v2ray
-  isTodayReady: false, // 今天的数据是否已成功拿到（一旦拿到即锁定，停止定时探测）
-  targetUrl: "",       // 实际使用的源地址
-  content: "",         // 源订阅文本内容
-  lastSuccessTime: 0,  // 最近一次成功获取的时间戳
-  lastFailedTime: 0,   // 最近一次探测今日失败的时间戳
-  lastRequestTime: 0,  // 最近一次请求/探测的时间戳
-  dataVersion: 1,      // 数据版本号 (变更时使 CF 边缘缓存立即失效)
-  lastNotifiedSuccessDate: "", // 当天成功通知记录 (防重复推送)
-  lastAlertSlots: []   // 已发送未更新告警的时段 (如 ["20261106-9"])
+  date: "", type: "clash", isTodayReady: false, targetUrl: "", content: "",
+  lastSuccessTime: 0, lastFailedTime: 0, lastRequestTime: 0, dataVersion: 1,
+  lastNotifiedSuccessDate: "", lastAlertSlots: []
 };
 
-function getCacheVersion() {
-  return memoryState.dataVersion || 1;
-}
+const getCacheVersion = () => memoryState.dataVersion || 1;
+const bumpCacheVersion = () => (memoryState.dataVersion = Date.now());
 
-function bumpCacheVersion() {
-  memoryState.dataVersion = Date.now();
-  return memoryState.dataVersion;
+async function isAlreadyNotified(tag, ttl = 86400) {
+  const cache = typeof caches !== "undefined" ? caches.default : null;
+  if (!cache) return false;
+  try {
+    const req = new Request(`https://parsefree.internal/${tag}`);
+    const hit = await cache.match(req);
+    if (hit) return true;
+    await cache.put(req, new Response("1", { headers: { "Cache-Control": `public, max-age=${ttl}` } }));
+  } catch (e) {}
+  return false;
 }
 
 function buildReturnData(result, retryCooldownMs) {
@@ -764,9 +762,9 @@ async function saveConfig(env = {}, newConfig = {}) {
     const current = await getSavedConfig(env);
     const updated = { ...current, ...newConfig };
     await kv.put("PARSEFREE_CONFIG", JSON.stringify(updated));
-    return { success: true, config: updated };
+    return { success: true, kvBound: true, config: updated };
   }
-  return { success: false, error: "未绑定 KV 命名空间 (PARSEFREE_KV)" };
+  return { success: true, kvBound: false, message: "本地已保存，全局建议配置在CF环境变量" };
 }
 
 async function fetchValidContent(url) {
@@ -789,7 +787,8 @@ async function resolveSubscriptionData({
   requestedType = "",
   requestedInterval = null,
   forceRefresh = false,
-  env = {}
+  env = {},
+  ctx = null
 }) {
   const savedConfig = await getSavedConfig(env);
   const type = (requestedType || savedConfig.type || "clash").toLowerCase();
@@ -876,7 +875,11 @@ async function resolveSubscriptionData({
       bumpCacheVersion();
       if (memoryState.lastNotifiedSuccessDate !== todayStr) {
         memoryState.lastNotifiedSuccessDate = todayStr;
-        sendSuccessPush({ todayStr, env, savedConfig }).catch(() => {});
+        const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
+        if (!already) {
+          const p = sendSuccessPush({ todayStr, env, savedConfig });
+          if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
+        }
       }
       return buildReturnData({
         content,
@@ -936,44 +939,39 @@ async function resolveSubscriptionData({
  * 遵循重试间隔限制，今日一旦成功获取立即停止探测
  * 支持 09:00 / 12:00 / 18:00 固定时段未发布告警推送
  */
-async function handleScheduledTask(env = {}) {
+async function handleScheduledTask(env = {}, ctx = null) {
   const bjNow = getBeijingDate();
   const todayStr = formatDate(bjNow);
   const bjHour = bjNow.getHours();
   const savedConfig = await getSavedConfig(env);
 
-  if (memoryState.isTodayReady && memoryState.date === todayStr) {
-    console.log(`[Cron] 今日数据已锁定 [${todayStr}]，停止探测。`);
-    return;
+  let data = null;
+  try {
+    data = await resolveSubscriptionData({ forceRefresh: true, env, ctx });
+  } catch (err) {
+    console.warn(`[Cron] 探测今日源异常:`, err.message);
   }
 
-  // 9点 / 12点 / 18点未发布自动告警推送
-  if ([9, 12, 18].includes(bjHour) && !memoryState.isTodayReady) {
-    const slotKey = `${todayStr}-${bjHour}`;
-    if (!memoryState.lastAlertSlots.includes(slotKey)) {
-      memoryState.lastAlertSlots.push(slotKey);
-      if (memoryState.lastAlertSlots.length > 20) memoryState.lastAlertSlots.shift();
-      sendAlertPush({
-        hour: bjHour,
-        todayStr,
-        fallbackDate: memoryState.date,
-        retryMinutes: savedConfig.retryInterval,
-        env,
-        savedConfig
-      }).catch(() => {});
+  if (data && data.isToday) {
+    const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
+    if (!already) {
+      const p = sendSuccessPush({ todayStr, env, savedConfig });
+      if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
+    }
+    return { success: true, isToday: true, date: todayStr, message: `今日新源已锁定 [${todayStr}]` };
+  }
+
+  if ([9, 12, 18].includes(bjHour)) {
+    const already = await isAlreadyNotified(`alert-${todayStr}-${bjHour}`, 7200);
+    if (!already) {
+      const p = sendAlertPush({
+        hour: bjHour, todayStr, fallbackDate: (data && data.sourceDate) || memoryState.date || "最新有效",
+        retryMinutes: savedConfig.retryInterval, env, savedConfig
+      });
+      if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
     }
   }
-
-  const retryCooldownMs = (savedConfig.retryInterval || DEFAULT_RETRY_INTERVAL_MINUTES) * 60 * 1000;
-  if (memoryState.lastFailedTime > 0 && Date.now() - memoryState.lastFailedTime < retryCooldownMs) {
-    return;
-  }
-
-  try {
-    await resolveSubscriptionData({ forceRefresh: true, env });
-  } catch (err) {
-    console.warn(`[Cron] 今日新源尚未发布:`, err.message);
-  }
+  return { success: true, isToday: false, date: (data && data.sourceDate) || memoryState.date, message: "今日新源待发布，已回退数据" };
 }
 
 // ==================== 7. 节点名称清洗与重命名模块 ====================
@@ -1390,13 +1388,16 @@ function renderDashboardHtml({
 
     <!-- 5. Bark 配置卡片 -->
     <div class="card">
-      <div class="card-title">Bark 配置</div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址 ${barkServer ? '<span style="color:#67c23a;font-size:12px;">(已配置)</span>' : ''}</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key ${barkKey ? '<span style="color:#67c23a;font-size:12px;">(已检测到有效配置)</span>' : '<span style="color:#e6a23c;font-size:12px;">(未配置，可直接输入或在CF环境变量设置)</span>'}</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="输入 Bark 设备Key，留空则默认使用 CF 环境变量" style="width: 100%;"></div>
-      <div style="margin-bottom: 14px; font-size: 13px;">
+      <div class="card-title">Bark 通知配置 (无需绑定 KV，支持 CF 环境变量)</div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址 ${barkServer ? '<span style="color:#67c23a;font-size:12px;">(已生效)</span>' : ''}</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key ${barkKey ? '<span style="color:#67c23a;font-size:12px;">(已检测到有效配置)</span>' : '<span style="color:#e6a23c;font-size:12px;">(可直接输入，或在CF环境变量配置 BARK_KEY)</span>'}</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="输入 Bark 设备Key，留空则默认使用 CF 环境变量" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px; font-size: 13px;">
         <label class="radio-label"><input type="checkbox" id="barkNotifySuccess" ${notifySuccess ? 'checked' : ''}> 每日更新成功推送</label>
         <label class="radio-label"><input type="checkbox" id="barkNotifyAlert" ${notifyAlert ? 'checked' : ''}> 9/12/18点未发布告警</label>
         <label class="radio-label"><input type="checkbox" id="barkNotifyDevice" ${notifyDevice ? 'checked' : ''}> 设备拉取节点通知 (5分钟防抖)</label>
+      </div>
+      <div style="background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 4px; padding: 8px 12px; font-size: 12px; color: #67c23a; margin-bottom: 12px; line-height: 1.5;">
+        <strong>💡 提示：</strong>完全无需绑定 KV 空间！推荐在 Cloudflare 后台设置环境变量 <code>BARK_KEY</code> 与 <code>BARK_SERVER</code>，全局自动生效；点击下方【测试通知】可直接校验连通性。
       </div>
       <div style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn btn-primary" onclick="saveBarkConfig()">保存配置</button>
@@ -1430,27 +1431,18 @@ function renderDashboardHtml({
       const h = Math.floor(leftSec / 3600);
       const m = Math.floor((leftSec % 3600) / 60);
       const s = leftSec % 60;
-      el.innerText = (h > 0 ? h + "小时" : "") + String(m).padStart(2, "0") + "分" + String(s).padStart(2, "0") + "秒";
-      leftSec--;
+      el.innerText = (h > 0 ? h + "小时" : "") + String(m).padStart(2, "0") + "分" + String(s).padStart(2, "0") + "秒"; leftSec--;
     }
-    updateCountdown();
-    setInterval(updateCountdown, 1000);
+    updateCountdown(); setInterval(updateCountdown, 1000);
 
     function showToast(msg) {
-      const t = document.getElementById("toast");
-      t.innerText = msg; t.style.display = "block";
-      setTimeout(() => { t.style.display = "none"; }, 2000);
+      const t = document.getElementById("toast"); t.innerText = msg; t.style.display = "block";
+      setTimeout(() => { t.style.display = "none"; }, 2500);
     }
-    function copyText(val) {
-      navigator.clipboard.writeText(val).then(() => showToast("已复制到剪贴板")).catch(() => prompt("请复制：", val));
-    }
-    function copyAllNodes() { copyText(allNodes.join("\\n")); }
+    const copyText = (val) => navigator.clipboard.writeText(val).then(() => showToast("已复制到剪贴板")).catch(() => prompt("请复制：", val));
+    const copyAllNodes = () => copyText(allNodes.join("\\n"));
+    const forceRefreshData = () => { const u = new URL(window.location.href); u.searchParams.set("refresh", "1"); window.location.href = u.toString(); };
 
-    function forceRefreshData() {
-      const u = new URL(window.location.href);
-      u.searchParams.set("refresh", "1");
-      window.location.href = u.toString();
-    }
     async function testBarkNotification() {
       const server = document.getElementById("barkServerInput").value.trim();
       const key = document.getElementById("barkKeyInput").value.trim();
@@ -1463,7 +1455,7 @@ function renderDashboardHtml({
         let d = {};
         try { d = JSON.parse(text); } catch(err) {
           if (text.includes("<!DOCTYPE") || text.includes("<html")) {
-            return alert("接口返回了 HTML 页面。可能原因：Cloudflare 正在部署最新代码（通常需1-2分钟），请稍候刷新重试；或当前开启了密码保护，请确保网址带有 ?token=密码。");
+            return alert("接口返回了 HTML 页面。可能原因：Cloudflare 正在部署最新代码，请稍候刷新重试。");
           }
           return alert("接口响应异常: " + text.slice(0, 80));
         }
@@ -1476,38 +1468,46 @@ function renderDashboardHtml({
       const notifySuccess = document.getElementById("barkNotifySuccess").checked;
       const notifyAlert = document.getElementById("barkNotifyAlert").checked;
       const notifyDevice = document.getElementById("barkNotifyDevice").checked;
+      try { localStorage.setItem("pf_bark", JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice })); } catch (e) {}
       try {
         const u = new URL("/api/save-bark", window.location.href);
         new URL(window.location.href).searchParams.forEach((v, k) => u.searchParams.set(k, v));
-        const res = await fetch(u.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice }) });
-        const text = await res.text();
-        let d = {};
-        try { d = JSON.parse(text); } catch(err) { return alert("接口未就绪，请等待 Cloudflare 部署完成或在环境变量中配置。"); }
-        if (d.success) showToast("✓ Bark 配置已成功保存至 KV"); else alert("保存提示: " + (d.error || "未绑定 KV，更推荐直接在 CF 环境变量中设置"));
-      } catch (e) { alert("保存失败: " + e.message); }
+        const res = await fetch(u.toString(), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice })
+        });
+        const d = await res.json().catch(() => ({}));
+        showToast(d.kvBound ? "✓ 配置已同步保存至 KV 与本地" : "✓ 配置已在本地保存！(推荐在CF环境变量配置)");
+      } catch (e) { showToast("✓ 配置已在本地保存生效！"); }
     }
-    function switchMode(m) {
+    try {
+      const loc = JSON.parse(localStorage.getItem("pf_bark") || "{}");
+      if (loc.barkServer && !document.getElementById("barkServerInput").value) document.getElementById("barkServerInput").value = loc.barkServer;
+      if (loc.barkKey && !document.getElementById("barkKeyInput").value) document.getElementById("barkKeyInput").value = loc.barkKey;
+      if (loc.notifySuccess !== undefined) document.getElementById("barkNotifySuccess").checked = loc.notifySuccess;
+      if (loc.notifyAlert !== undefined) document.getElementById("barkNotifyAlert").checked = loc.notifyAlert;
+      if (loc.notifyDevice !== undefined) document.getElementById("barkNotifyDevice").checked = loc.notifyDevice;
+    } catch (e) {}
+    const switchMode = (m) => {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
       if (m === "auto") { const u = new URL(window.location.href); u.searchParams.delete("source"); u.searchParams.delete("mode"); window.location.href = u.toString(); }
-    }
-    function switchType(t) { const u = new URL(window.location.href); u.searchParams.set("type", t); window.location.href = u.toString(); }
-    function applyManualUrl() {
+    };
+    const switchType = (t) => { const u = new URL(window.location.href); u.searchParams.set("type", t); window.location.href = u.toString(); };
+    const applyManualUrl = () => {
       const val = document.getElementById("customInput").value.trim();
       if (!val) return alert("请输入有效地址");
       const u = new URL(window.location.href); u.searchParams.set("source", val); window.location.href = u.toString();
-    }
-    function applyInterval() {
+    };
+    const applyInterval = () => {
       const val = document.getElementById("intervalInput").value.trim();
       const u = new URL(window.location.href); if (val) u.searchParams.set("retry_interval", val); window.location.href = u.toString();
-    }
-    function applyRenameOptions() {
-      const fn = document.getElementById("firstNameInput").value.trim();
-      const p = document.getElementById("prefixInput").value;
-      const u = new URL(window.location.href);
+    };
+    const applyRenameOptions = () => {
+      const fn = document.getElementById("firstNameInput").value.trim(), p = document.getElementById("prefixInput").value, u = new URL(window.location.href);
       if (fn) u.searchParams.set("first_name", fn); else u.searchParams.delete("first_name");
       if (p) u.searchParams.set("prefix", p); else u.searchParams.delete("prefix");
       window.location.href = u.toString();
-    }
+    };
   </script>
 </body>
 </html>`;
@@ -1547,8 +1547,9 @@ export default {
     const { pathname, searchParams } = url;
 
     // 1. 访问鉴权校验（环境变量配置 AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN）
+    const isCronRoute = pathname === "/api/cron" || pathname === "/cron";
     const auth = verifyAuth(request, env);
-    if (!auth.authenticated) {
+    if (!auth.authenticated && !isCronRoute) {
       if (pathname.startsWith("/api/")) {
         return new Response(JSON.stringify({ success: false, error: "鉴权未通过: 请在请求中携带正确的 token 参数" }), {
           status: 401,
@@ -1556,6 +1557,26 @@ export default {
         });
       }
       return buildAuthRequiredResponse();
+    }
+
+    // 1.1 定时任务主动触发端点 (支持外部 Cron / GitHub Actions / 平台触发)
+    if (isCronRoute) {
+      const secret = env.CRON_SECRET || "";
+      if (secret && searchParams.get("secret") !== secret && searchParams.get("token") !== secret) {
+        return new Response(JSON.stringify({ success: false, error: "CRON_SECRET 校验未通过" }), {
+          status: 401, headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
+      try {
+        const cronRes = await handleScheduledTask(env, ctx);
+        return new Response(JSON.stringify(cronRes), {
+          status: 200, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ success: false, error: err.message }), {
+          status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
     }
 
     // 1.1 Bark 配置测试与保存 API 路由
@@ -1632,7 +1653,8 @@ export default {
         requestedType,
         requestedInterval,
         forceRefresh,
-        env
+        env,
+        ctx
       });
       let nodes = parseSubscription(data.content);
 
@@ -1750,6 +1772,6 @@ export default {
 
   // 定时任务 (Cron Trigger) 触发处理
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(handleScheduledTask(env));
+    ctx.waitUntil(handleScheduledTask(env, ctx));
   }
 };

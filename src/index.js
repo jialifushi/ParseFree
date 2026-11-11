@@ -31,8 +31,9 @@ export default {
     const { pathname, searchParams } = url;
 
     // 1. 访问鉴权校验（环境变量配置 AUTH_USERNAME / AUTH_PASSWORD / AUTH_TOKEN）
+    const isCronRoute = pathname === "/api/cron" || pathname === "/cron";
     const auth = verifyAuth(request, env);
-    if (!auth.authenticated) {
+    if (!auth.authenticated && !isCronRoute) {
       if (pathname.startsWith("/api/")) {
         return new Response(JSON.stringify({ success: false, error: "鉴权未通过: 请在请求中携带正确的 token 参数" }), {
           status: 401,
@@ -40,6 +41,26 @@ export default {
         });
       }
       return buildAuthRequiredResponse();
+    }
+
+    // 1.1 定时任务主动触发端点 (支持外部 Cron / GitHub Actions / 平台触发)
+    if (isCronRoute) {
+      const secret = env.CRON_SECRET || "";
+      if (secret && searchParams.get("secret") !== secret && searchParams.get("token") !== secret) {
+        return new Response(JSON.stringify({ success: false, error: "CRON_SECRET 校验未通过" }), {
+          status: 401, headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
+      try {
+        const cronRes = await handleScheduledTask(env, ctx);
+        return new Response(JSON.stringify(cronRes), {
+          status: 200, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ success: false, error: err.message }), {
+          status: 500, headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
     }
 
     // 1.1 Bark 配置测试与保存 API 路由
@@ -116,7 +137,8 @@ export default {
         requestedType,
         requestedInterval,
         forceRefresh,
-        env
+        env,
+        ctx
       });
       let nodes = parseSubscription(data.content);
 
@@ -234,6 +256,6 @@ export default {
 
   // 定时任务 (Cron Trigger) 触发处理
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(handleScheduledTask(env));
+    ctx.waitUntil(handleScheduledTask(env, ctx));
   }
 };

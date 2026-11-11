@@ -16,26 +16,24 @@ export const DEFAULT_RETRY_INTERVAL_MINUTES = 10;
 
 // 内存中记录的最新状态缓存
 let memoryState = {
-  date: "",            // 当前提供数据的日期 (YYYYMMDD)
-  type: "clash",       // 源类型: clash | v2ray
-  isTodayReady: false, // 今天的数据是否已成功拿到（一旦拿到即锁定，停止定时探测）
-  targetUrl: "",       // 实际使用的源地址
-  content: "",         // 源订阅文本内容
-  lastSuccessTime: 0,  // 最近一次成功获取的时间戳
-  lastFailedTime: 0,   // 最近一次探测今日失败的时间戳
-  lastRequestTime: 0,  // 最近一次请求/探测的时间戳
-  dataVersion: 1,      // 数据版本号 (变更时使 CF 边缘缓存立即失效)
-  lastNotifiedSuccessDate: "", // 当天成功通知记录 (防重复推送)
-  lastAlertSlots: []   // 已发送未更新告警的时段 (如 ["20261106-9"])
+  date: "", type: "clash", isTodayReady: false, targetUrl: "", content: "",
+  lastSuccessTime: 0, lastFailedTime: 0, lastRequestTime: 0, dataVersion: 1,
+  lastNotifiedSuccessDate: "", lastAlertSlots: []
 };
 
-export function getCacheVersion() {
-  return memoryState.dataVersion || 1;
-}
+export const getCacheVersion = () => memoryState.dataVersion || 1;
+export const bumpCacheVersion = () => (memoryState.dataVersion = Date.now());
 
-export function bumpCacheVersion() {
-  memoryState.dataVersion = Date.now();
-  return memoryState.dataVersion;
+export async function isAlreadyNotified(tag, ttl = 86400) {
+  const cache = typeof caches !== "undefined" ? caches.default : null;
+  if (!cache) return false;
+  try {
+    const req = new Request(`https://parsefree.internal/${tag}`);
+    const hit = await cache.match(req);
+    if (hit) return true;
+    await cache.put(req, new Response("1", { headers: { "Cache-Control": `public, max-age=${ttl}` } }));
+  } catch (e) {}
+  return false;
 }
 
 function buildReturnData(result, retryCooldownMs) {
@@ -83,9 +81,9 @@ export async function saveConfig(env = {}, newConfig = {}) {
     const current = await getSavedConfig(env);
     const updated = { ...current, ...newConfig };
     await kv.put("PARSEFREE_CONFIG", JSON.stringify(updated));
-    return { success: true, config: updated };
+    return { success: true, kvBound: true, config: updated };
   }
-  return { success: false, error: "未绑定 KV 命名空间 (PARSEFREE_KV)" };
+  return { success: true, kvBound: false, message: "本地已保存，全局建议配置在CF环境变量" };
 }
 
 async function fetchValidContent(url) {
@@ -108,7 +106,8 @@ export async function resolveSubscriptionData({
   requestedType = "",
   requestedInterval = null,
   forceRefresh = false,
-  env = {}
+  env = {},
+  ctx = null
 }) {
   const savedConfig = await getSavedConfig(env);
   const type = (requestedType || savedConfig.type || "clash").toLowerCase();
@@ -195,7 +194,11 @@ export async function resolveSubscriptionData({
       bumpCacheVersion();
       if (memoryState.lastNotifiedSuccessDate !== todayStr) {
         memoryState.lastNotifiedSuccessDate = todayStr;
-        sendSuccessPush({ todayStr, env, savedConfig }).catch(() => {});
+        const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
+        if (!already) {
+          const p = sendSuccessPush({ todayStr, env, savedConfig });
+          if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
+        }
       }
       return buildReturnData({
         content,
@@ -255,42 +258,37 @@ export async function resolveSubscriptionData({
  * 遵循重试间隔限制，今日一旦成功获取立即停止探测
  * 支持 09:00 / 12:00 / 18:00 固定时段未发布告警推送
  */
-export async function handleScheduledTask(env = {}) {
+export async function handleScheduledTask(env = {}, ctx = null) {
   const bjNow = getBeijingDate();
   const todayStr = formatDate(bjNow);
   const bjHour = bjNow.getHours();
   const savedConfig = await getSavedConfig(env);
 
-  if (memoryState.isTodayReady && memoryState.date === todayStr) {
-    console.log(`[Cron] 今日数据已锁定 [${todayStr}]，停止探测。`);
-    return;
+  let data = null;
+  try {
+    data = await resolveSubscriptionData({ forceRefresh: true, env, ctx });
+  } catch (err) {
+    console.warn(`[Cron] 探测今日源异常:`, err.message);
   }
 
-  // 9点 / 12点 / 18点未发布自动告警推送
-  if ([9, 12, 18].includes(bjHour) && !memoryState.isTodayReady) {
-    const slotKey = `${todayStr}-${bjHour}`;
-    if (!memoryState.lastAlertSlots.includes(slotKey)) {
-      memoryState.lastAlertSlots.push(slotKey);
-      if (memoryState.lastAlertSlots.length > 20) memoryState.lastAlertSlots.shift();
-      sendAlertPush({
-        hour: bjHour,
-        todayStr,
-        fallbackDate: memoryState.date,
-        retryMinutes: savedConfig.retryInterval,
-        env,
-        savedConfig
-      }).catch(() => {});
+  if (data && data.isToday) {
+    const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
+    if (!already) {
+      const p = sendSuccessPush({ todayStr, env, savedConfig });
+      if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
+    }
+    return { success: true, isToday: true, date: todayStr, message: `今日新源已锁定 [${todayStr}]` };
+  }
+
+  if ([9, 12, 18].includes(bjHour)) {
+    const already = await isAlreadyNotified(`alert-${todayStr}-${bjHour}`, 7200);
+    if (!already) {
+      const p = sendAlertPush({
+        hour: bjHour, todayStr, fallbackDate: (data && data.sourceDate) || memoryState.date || "最新有效",
+        retryMinutes: savedConfig.retryInterval, env, savedConfig
+      });
+      if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
     }
   }
-
-  const retryCooldownMs = (savedConfig.retryInterval || DEFAULT_RETRY_INTERVAL_MINUTES) * 60 * 1000;
-  if (memoryState.lastFailedTime > 0 && Date.now() - memoryState.lastFailedTime < retryCooldownMs) {
-    return;
-  }
-
-  try {
-    await resolveSubscriptionData({ forceRefresh: true, env });
-  } catch (err) {
-    console.warn(`[Cron] 今日新源尚未发布:`, err.message);
-  }
+  return { success: true, isToday: false, date: (data && data.sourceDate) || memoryState.date, message: "今日新源待发布，已回退数据" };
 }

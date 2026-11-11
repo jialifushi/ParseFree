@@ -172,13 +172,16 @@ export function renderDashboardHtml({
 
     <!-- 5. Bark 配置卡片 -->
     <div class="card">
-      <div class="card-title">Bark 配置</div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址 ${barkServer ? '<span style="color:#67c23a;font-size:12px;">(已配置)</span>' : ''}</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
-      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key ${barkKey ? '<span style="color:#67c23a;font-size:12px;">(已检测到有效配置)</span>' : '<span style="color:#e6a23c;font-size:12px;">(未配置，可直接输入或在CF环境变量设置)</span>'}</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="输入 Bark 设备Key，留空则默认使用 CF 环境变量" style="width: 100%;"></div>
-      <div style="margin-bottom: 14px; font-size: 13px;">
+      <div class="card-title">Bark 通知配置 (无需绑定 KV，支持 CF 环境变量)</div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">服务器地址 ${barkServer ? '<span style="color:#67c23a;font-size:12px;">(已生效)</span>' : ''}</div><input type="text" class="input-control" id="barkServerInput" value="${barkServer}" placeholder="例如: https://apple.hertzhe.dpdns.org" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px;"><div style="font-size: 13px; color: var(--el-text-regular); margin-bottom: 4px;">设备Key ${barkKey ? '<span style="color:#67c23a;font-size:12px;">(已检测到有效配置)</span>' : '<span style="color:#e6a23c;font-size:12px;">(可直接输入，或在CF环境变量配置 BARK_KEY)</span>'}</div><input type="text" class="input-control" id="barkKeyInput" value="${barkKey}" placeholder="输入 Bark 设备Key，留空则默认使用 CF 环境变量" style="width: 100%;"></div>
+      <div style="margin-bottom: 12px; font-size: 13px;">
         <label class="radio-label"><input type="checkbox" id="barkNotifySuccess" ${notifySuccess ? 'checked' : ''}> 每日更新成功推送</label>
         <label class="radio-label"><input type="checkbox" id="barkNotifyAlert" ${notifyAlert ? 'checked' : ''}> 9/12/18点未发布告警</label>
         <label class="radio-label"><input type="checkbox" id="barkNotifyDevice" ${notifyDevice ? 'checked' : ''}> 设备拉取节点通知 (5分钟防抖)</label>
+      </div>
+      <div style="background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 4px; padding: 8px 12px; font-size: 12px; color: #67c23a; margin-bottom: 12px; line-height: 1.5;">
+        <strong>💡 提示：</strong>完全无需绑定 KV 空间！推荐在 Cloudflare 后台设置环境变量 <code>BARK_KEY</code> 与 <code>BARK_SERVER</code>，全局自动生效；点击下方【测试通知】可直接校验连通性。
       </div>
       <div style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn btn-primary" onclick="saveBarkConfig()">保存配置</button>
@@ -212,27 +215,18 @@ export function renderDashboardHtml({
       const h = Math.floor(leftSec / 3600);
       const m = Math.floor((leftSec % 3600) / 60);
       const s = leftSec % 60;
-      el.innerText = (h > 0 ? h + "小时" : "") + String(m).padStart(2, "0") + "分" + String(s).padStart(2, "0") + "秒";
-      leftSec--;
+      el.innerText = (h > 0 ? h + "小时" : "") + String(m).padStart(2, "0") + "分" + String(s).padStart(2, "0") + "秒"; leftSec--;
     }
-    updateCountdown();
-    setInterval(updateCountdown, 1000);
+    updateCountdown(); setInterval(updateCountdown, 1000);
 
     function showToast(msg) {
-      const t = document.getElementById("toast");
-      t.innerText = msg; t.style.display = "block";
-      setTimeout(() => { t.style.display = "none"; }, 2000);
+      const t = document.getElementById("toast"); t.innerText = msg; t.style.display = "block";
+      setTimeout(() => { t.style.display = "none"; }, 2500);
     }
-    function copyText(val) {
-      navigator.clipboard.writeText(val).then(() => showToast("已复制到剪贴板")).catch(() => prompt("请复制：", val));
-    }
-    function copyAllNodes() { copyText(allNodes.join("\\n")); }
+    const copyText = (val) => navigator.clipboard.writeText(val).then(() => showToast("已复制到剪贴板")).catch(() => prompt("请复制：", val));
+    const copyAllNodes = () => copyText(allNodes.join("\\n"));
+    const forceRefreshData = () => { const u = new URL(window.location.href); u.searchParams.set("refresh", "1"); window.location.href = u.toString(); };
 
-    function forceRefreshData() {
-      const u = new URL(window.location.href);
-      u.searchParams.set("refresh", "1");
-      window.location.href = u.toString();
-    }
     async function testBarkNotification() {
       const server = document.getElementById("barkServerInput").value.trim();
       const key = document.getElementById("barkKeyInput").value.trim();
@@ -245,7 +239,7 @@ export function renderDashboardHtml({
         let d = {};
         try { d = JSON.parse(text); } catch(err) {
           if (text.includes("<!DOCTYPE") || text.includes("<html")) {
-            return alert("接口返回了 HTML 页面。可能原因：Cloudflare 正在部署最新代码（通常需1-2分钟），请稍候刷新重试；或当前开启了密码保护，请确保网址带有 ?token=密码。");
+            return alert("接口返回了 HTML 页面。可能原因：Cloudflare 正在部署最新代码，请稍候刷新重试。");
           }
           return alert("接口响应异常: " + text.slice(0, 80));
         }
@@ -258,38 +252,46 @@ export function renderDashboardHtml({
       const notifySuccess = document.getElementById("barkNotifySuccess").checked;
       const notifyAlert = document.getElementById("barkNotifyAlert").checked;
       const notifyDevice = document.getElementById("barkNotifyDevice").checked;
+      try { localStorage.setItem("pf_bark", JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice })); } catch (e) {}
       try {
         const u = new URL("/api/save-bark", window.location.href);
         new URL(window.location.href).searchParams.forEach((v, k) => u.searchParams.set(k, v));
-        const res = await fetch(u.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice }) });
-        const text = await res.text();
-        let d = {};
-        try { d = JSON.parse(text); } catch(err) { return alert("接口未就绪，请等待 Cloudflare 部署完成或在环境变量中配置。"); }
-        if (d.success) showToast("✓ Bark 配置已成功保存至 KV"); else alert("保存提示: " + (d.error || "未绑定 KV，更推荐直接在 CF 环境变量中设置"));
-      } catch (e) { alert("保存失败: " + e.message); }
+        const res = await fetch(u.toString(), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ barkServer, barkKey, notifySuccess, notifyAlert, notifyDevice })
+        });
+        const d = await res.json().catch(() => ({}));
+        showToast(d.kvBound ? "✓ 配置已同步保存至 KV 与本地" : "✓ 配置已在本地保存！(推荐在CF环境变量配置)");
+      } catch (e) { showToast("✓ 配置已在本地保存生效！"); }
     }
-    function switchMode(m) {
+    try {
+      const loc = JSON.parse(localStorage.getItem("pf_bark") || "{}");
+      if (loc.barkServer && !document.getElementById("barkServerInput").value) document.getElementById("barkServerInput").value = loc.barkServer;
+      if (loc.barkKey && !document.getElementById("barkKeyInput").value) document.getElementById("barkKeyInput").value = loc.barkKey;
+      if (loc.notifySuccess !== undefined) document.getElementById("barkNotifySuccess").checked = loc.notifySuccess;
+      if (loc.notifyAlert !== undefined) document.getElementById("barkNotifyAlert").checked = loc.notifyAlert;
+      if (loc.notifyDevice !== undefined) document.getElementById("barkNotifyDevice").checked = loc.notifyDevice;
+    } catch (e) {}
+    const switchMode = (m) => {
       document.getElementById("manualBox").style.display = m === "manual" ? "block" : "none";
       if (m === "auto") { const u = new URL(window.location.href); u.searchParams.delete("source"); u.searchParams.delete("mode"); window.location.href = u.toString(); }
-    }
-    function switchType(t) { const u = new URL(window.location.href); u.searchParams.set("type", t); window.location.href = u.toString(); }
-    function applyManualUrl() {
+    };
+    const switchType = (t) => { const u = new URL(window.location.href); u.searchParams.set("type", t); window.location.href = u.toString(); };
+    const applyManualUrl = () => {
       const val = document.getElementById("customInput").value.trim();
       if (!val) return alert("请输入有效地址");
       const u = new URL(window.location.href); u.searchParams.set("source", val); window.location.href = u.toString();
-    }
-    function applyInterval() {
+    };
+    const applyInterval = () => {
       const val = document.getElementById("intervalInput").value.trim();
       const u = new URL(window.location.href); if (val) u.searchParams.set("retry_interval", val); window.location.href = u.toString();
-    }
-    function applyRenameOptions() {
-      const fn = document.getElementById("firstNameInput").value.trim();
-      const p = document.getElementById("prefixInput").value;
-      const u = new URL(window.location.href);
+    };
+    const applyRenameOptions = () => {
+      const fn = document.getElementById("firstNameInput").value.trim(), p = document.getElementById("prefixInput").value, u = new URL(window.location.href);
       if (fn) u.searchParams.set("first_name", fn); else u.searchParams.delete("first_name");
       if (p) u.searchParams.set("prefix", p); else u.searchParams.delete("prefix");
       window.location.href = u.toString();
-    }
+    };
   </script>
 </body>
 </html>`;

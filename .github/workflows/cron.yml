@@ -1,0 +1,26 @@
+name: ParseFree Auto Sync & Push Cron
+
+on:
+  schedule:
+    # 每 30 分钟自动执行一次定时检查（自动触发每日锁定更新、09/12/18点告警推送）
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # 支持在 GitHub 后台手动一键点击触发测试
+
+jobs:
+  trigger-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger ParseFree Cron Endpoint
+        run: |
+          echo "触发 ParseFree 自动化定时探测与 Bark 推送任务..."
+          TARGET_URL="${{ secrets.PARSEFREE_URL }}"
+          if [ -z "$TARGET_URL" ]; then
+            TARGET_URL="https://parsefree.pages.dev"
+          fi
+          
+          TOKEN="${{ secrets.AUTH_TOKEN }}"
+          if [ -n "$TOKEN" ]; then
+            curl -sS -m 30 "${TARGET_URL}/api/cron?token=${TOKEN}" || true
+          else
+            curl -sS -m 30 "${TARGET_URL}/api/cron" || true
+          fi

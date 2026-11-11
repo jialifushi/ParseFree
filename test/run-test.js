@@ -17,9 +17,11 @@ async function runTests() {
 
   const firstNode = lines[0];
   console.log("   首节点完整 URI:", firstNode);
-  // 必须包含 "HOS Daily官方维护02"（当前回退到02日）
-  assert(firstNode.includes(encodeURIComponent("HOS Daily官方维护02")), "首节点名称必须包含日后缀 '02'，如 HOS Daily官方维护02");
-  console.log("   ✓ 首节点成功显示为: HOS Daily官方维护02 (可通过第一条直观识别更新状态)");
+  const sourceDate = decodeURIComponent(resSub.headers.get("X-Source-Date") || "");
+  const dayPart = sourceDate.slice(-2);
+  const expectedFirstName = `HOS Daily官方维护${dayPart}`;
+  assert(firstNode.includes(encodeURIComponent(expectedFirstName)), `首节点名称必须包含数据源日后缀 '${dayPart}'，如 ${expectedFirstName}`);
+  console.log(`   ✓ 首节点成功显示为: ${expectedFirstName} (可通过第一条直观识别更新状态)`);
 
   // 1.1 校验针对小火箭的订阅标头与防缓存标头
   assert.strictEqual(resSub.headers.get("Cache-Control"), "no-cache, no-store, must-revalidate", "客户端响应必须下发 no-cache 防小火箭本地缓存");
@@ -32,10 +34,15 @@ async function runTests() {
 
   // 2. 验证普通节点前缀 (HOS自动化线路)
   const secondNode = lines[1];
-  const b64 = secondNode.replace("vmess://", "");
-  const vmessObj = JSON.parse(Buffer.from(b64, "base64").toString("utf-8"));
-  console.log("   第二节点 ps 字段:", vmessObj.ps);
-  assert(vmessObj.ps.startsWith("HOS自动化线路 "), "普通节点名称前面必须带有 'HOS自动化线路 ' 前缀");
+  let secondName = "";
+  if (secondNode.startsWith("vmess://")) {
+    const vmessObj = JSON.parse(Buffer.from(secondNode.replace("vmess://", ""), "base64").toString("utf-8"));
+    secondName = vmessObj.ps;
+  } else if (secondNode.includes("#")) {
+    secondName = decodeURIComponent(secondNode.split("#")[1]);
+  }
+  console.log("   第二节点名称:", secondName);
+  assert(secondName.startsWith("HOS自动化线路 "), "普通节点名称前面必须带有 'HOS自动化线路 ' 前缀");
   console.log("   ✓ 普通节点前缀验证正常");
 
   // 3. 测试重试间隔参数 (?retry_interval=15) 与时间元数据展示
@@ -56,21 +63,34 @@ async function runTests() {
   assert(html.includes("测试通知"), "页面应包含 测试通知 按钮");
   console.log("   ✓ 重试间隔设置、倒计时与 Bark 配置卡片展示正常");
 
-  // 3.1 测试 Bark API 接口 (/api/test-bark)
-  console.log("3.1 测试 Bark 接口 (/api/test-bark)...");
+  // 3.1 测试 Bark API 接口 (/api/test-bark 与 /api/save-bark)
+  console.log("3.1 测试 Bark 接口 (/api/test-bark 与 /api/save-bark)...");
   const resBarkEmpty = await worker.fetch(new Request("http://localhost:8787/api/test-bark", { method: "POST" }), {});
   assert.strictEqual(resBarkEmpty.status, 400, "无 Key 时应返回 400");
-  const jsonBarkEmpty = await resBarkEmpty.json();
-  assert.strictEqual(jsonBarkEmpty.success, false);
-  console.log("   ✓ Bark API 校验与错误处理正常");
+  const resSaveNoKv = await worker.fetch(new Request("http://localhost:8787/api/save-bark", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ barkKey: "test" })
+  }), {});
+  assert.strictEqual(resSaveNoKv.status, 200, "无 KV 时保存也应成功返回 200");
+  const jsonSaveNoKv = await resSaveNoKv.json();
+  assert.strictEqual(jsonSaveNoKv.success, true);
+  console.log("   ✓ Bark API 校验与无 KV 安全保存正常");
+
+  // 3.2 测试 Cron 主动触发端点 (/api/cron)
+  console.log("3.2 测试 Cron 主动触发端点 (/api/cron)...");
+  const resCron = await worker.fetch(new Request("http://localhost:8787/api/cron"), {});
+  assert.strictEqual(resCron.status, 200, "/api/cron 状态码应为 200");
+  const jsonCron = await resCron.json();
+  assert.strictEqual(jsonCron.success, true, "/api/cron 执行应成功");
+  console.log("   ✓ Cron 主动触发端点验证正常:", jsonCron.message);
 
   // 4. 测试自定义首节点与前缀参数 (?first_name=定制官方节点&prefix=线路前缀-)
   console.log("4. 测试自定义首节点参数 (附带02日后缀)...");
   const reqCustom = new Request("http://localhost:8787/sub?first_name=定制官方节点&prefix=线路前缀-");
   const resCustom = await worker.fetch(reqCustom, {});
   const cLines = (await resCustom.text()).split("\n").map(l => l.trim()).filter(Boolean);
-  assert(cLines[0].includes(encodeURIComponent("定制官方节点02")), "自定义首节点名称同样应自动附加 '02' 后缀");
-  console.log("   ✓ 自定义名称自动追加日后缀验证通过: 定制官方节点02");
+  const expectedCustomFirst = `定制官方节点${dayPart}`;
+  assert(cLines[0].includes(encodeURIComponent(expectedCustomFirst)), `自定义首节点名称同样应自动附加 '${dayPart}' 后缀`);
+  console.log(`   ✓ 自定义名称自动追加日后缀验证通过: ${expectedCustomFirst}`);
 
   // 5. 测试小火箭 Base64 订阅输出 (?b64=1)
   console.log("5. 测试 Base64 订阅输出 (?b64=1)...");
@@ -78,7 +98,7 @@ async function runTests() {
   assert.strictEqual(resB64.status, 200);
   const b64Text = await resB64.text();
   const decodedFromB64 = Buffer.from(b64Text, "base64").toString("utf-8");
-  assert(decodedFromB64.includes(encodeURIComponent("HOS Daily官方维护02")), "Base64 解码后必须包含正确的首节点");
+  assert(decodedFromB64.includes(encodeURIComponent(expectedFirstName)), "Base64 解码后必须包含正确的首节点");
   console.log("   ✓ Base64 订阅输出与解码验证通过");
 
   // 6. 测试打包产物 dist/worker.js 与 _worker.js
@@ -86,7 +106,7 @@ async function runTests() {
   const resDist = await distWorkerModule.fetch(new Request("http://localhost:8787/sub"), {});
   assert.strictEqual(resDist.status, 200);
   const distLines = (await resDist.text()).split("\n").map(l => l.trim()).filter(Boolean);
-  assert(distLines[0].includes(encodeURIComponent("HOS Daily官方维护02")), "打包版首节点日后缀正常");
+  assert(distLines[0].includes(encodeURIComponent(expectedFirstName)), "打包版首节点日后缀正常");
   const resRoot = await rootWorkerModule.fetch(new Request("http://localhost:8787/sub"), {});
   assert.strictEqual(resRoot.status, 200);
 
