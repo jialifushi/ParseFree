@@ -1,5 +1,6 @@
 import assert from "assert";
 import worker from "../src/index.js";
+import { sendSuccessPush, sendAlertPush, sendClientFetchPush } from "../src/bark.js";
 import distWorkerModule from "../dist/worker.js";
 import rootWorkerModule from "../_worker.js";
 
@@ -82,6 +83,32 @@ async function runTests() {
   const jsonCron = await resCron.json();
   assert.strictEqual(jsonCron.success, true, "/api/cron 执行应成功");
   console.log("   ✓ Cron 主动触发端点验证正常:", jsonCron.message);
+
+  // 3.3 测试定时检查通知与设备拉取通知的内容及分组区分
+  console.log("3.3 验证定时巡检通知与设备拉取通知内容/分组差异...");
+  const capturedPayloads = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    capturedPayloads.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ code: 200, message: "success" }), { status: 200 });
+  };
+  try {
+    const mockEnv = { BARK_KEY: "test-key", BARK_SERVER: "https://api.day.app" };
+    await sendSuccessPush({ todayStr: "20261112", sourceType: "clash", triggerSource: "定时巡检", env: mockEnv });
+    await sendAlertPush({ hour: 9, todayStr: "20261112", fallbackDate: "20261111", env: mockEnv });
+    await sendClientFetchPush({
+      clientUa: "Shadowrocket/2100", clientIp: "1.2.3.4", region: "CN-Shanghai",
+      format: "Base64", sourceType: "clash", nodeCount: 30, sourceDate: "20261112", env: mockEnv
+    });
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+  assert.strictEqual(capturedPayloads.length, 3, "应发送3条通知");
+  assert(capturedPayloads[0].title.includes("[定时巡检]") && capturedPayloads[0].group === "ParseFree-定时巡检");
+  assert(capturedPayloads[1].title.includes("[定时巡检]") && capturedPayloads[1].group === "ParseFree-定时巡检");
+  assert(capturedPayloads[2].title.includes("[访问审计]") && capturedPayloads[2].group === "ParseFree-拉取记录");
+  assert(capturedPayloads[2].body.includes("Shadowrocket") && capturedPayloads[2].body.includes("1.2.3.4 (CN-Shanghai)"));
+  console.log("   ✓ 定时巡检通知与设备拉取通知在标题、正文、分组上均已明确区分");
 
   // 4. 测试自定义首节点与前缀参数 (?first_name=定制官方节点&prefix=线路前缀-)
   console.log("4. 测试自定义首节点参数 (附带02日后缀)...");

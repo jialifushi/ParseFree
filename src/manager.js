@@ -71,7 +71,7 @@ export async function getSavedConfig(env = {}) {
     barkKey: s.barkKey || env.BARK_KEY || "",
     notifySuccess: s.notifySuccess !== undefined ? Boolean(s.notifySuccess) : (env.BARK_NOTIFY_SUCCESS !== "0"),
     notifyAlert: s.notifyAlert !== undefined ? Boolean(s.notifyAlert) : (env.BARK_NOTIFY_ALERT !== "0"),
-    notifyDevice: s.notifyDevice !== undefined ? Boolean(s.notifyDevice) : (env.BARK_NOTIFY_DEVICE === "1")
+    notifyDevice: s.notifyDevice !== undefined ? Boolean(s.notifyDevice) : (env.BARK_NOTIFY_DEVICE !== "0")
   };
 }
 
@@ -102,12 +102,8 @@ async function fetchValidContent(url) {
  * 每天00点后自动递增，失败按设定间隔重试，失败期间自动回退最新可用数据，成功后立刻停止探测
  */
 export async function resolveSubscriptionData({
-  requestedSource = "",
-  requestedType = "",
-  requestedInterval = null,
-  forceRefresh = false,
-  env = {},
-  ctx = null
+  requestedSource = "", requestedType = "", requestedInterval = null,
+  forceRefresh = false, env = {}, ctx = null, triggerSource = "订阅拉取触发"
 }) {
   const savedConfig = await getSavedConfig(env);
   const type = (requestedType || savedConfig.type || "clash").toLowerCase();
@@ -196,7 +192,7 @@ export async function resolveSubscriptionData({
         memoryState.lastNotifiedSuccessDate = todayStr;
         const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
         if (!already) {
-          const p = sendSuccessPush({ todayStr, env, savedConfig });
+          const p = sendSuccessPush({ todayStr, sourceType: cType, triggerSource, env, savedConfig });
           if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
         }
       }
@@ -266,7 +262,7 @@ export async function handleScheduledTask(env = {}, ctx = null) {
 
   let data = null;
   try {
-    data = await resolveSubscriptionData({ forceRefresh: true, env, ctx });
+    data = await resolveSubscriptionData({ forceRefresh: true, env, ctx, triggerSource: "定时巡检" });
   } catch (err) {
     console.warn(`[Cron] 探测今日源异常:`, err.message);
   }
@@ -274,7 +270,7 @@ export async function handleScheduledTask(env = {}, ctx = null) {
   if (data && data.isToday) {
     const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
     if (!already) {
-      const p = sendSuccessPush({ todayStr, env, savedConfig });
+      const p = sendSuccessPush({ todayStr, sourceType: data.type || savedConfig.type || "clash", triggerSource: "定时巡检", env, savedConfig });
       if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
     }
     return { success: true, isToday: true, date: todayStr, message: `今日新源已锁定 [${todayStr}]` };

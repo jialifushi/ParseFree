@@ -24,6 +24,13 @@ function isProxyClient(userAgent = "") {
   return CLIENT_UA_PATTERNS.some(p => ua.includes(p));
 }
 
+function scheduleClientPush({ ctx, env, clientUa, clientIp, region, isB64, sourceType, nodeCount, sourceDate }) {
+  if (!ctx || typeof ctx.waitUntil !== "function") return;
+  ctx.waitUntil(getSavedConfig(env).then(saved => sendClientFetchPush({
+    clientUa, clientIp, region, format: isB64 ? "Base64" : "明文", sourceType, nodeCount, sourceDate, env, savedConfig: saved
+  })));
+}
+
 export default {
   // HTTP 请求处理
   async fetch(request, env, ctx) {
@@ -112,6 +119,12 @@ export default {
     const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
     const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
 
+    const clientUa = request.headers.get("user-agent") || "";
+    const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
+    const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
+    const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "";
+    const region = request.cf && request.cf.country ? `${request.cf.country}${request.cf.city ? "-" + request.cf.city : ""}` : "";
+
     // 3. 边缘缓存处理 (注入版本号与数据版本，定时任务更新或改版时旧缓存立即失效)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKeyUrl = new URL(url.toString());
@@ -121,6 +134,14 @@ export default {
     if (cache && !forceRefresh && request.method === "GET") {
       const cached = await cache.match(cacheKey);
       if (cached) {
+        if (isClientRequest) {
+          scheduleClientPush({
+            ctx, env, clientUa, clientIp, region, isB64,
+            sourceType: decodeURIComponent(cached.headers.get("X-Source-Type") || "clash"),
+            nodeCount: Number(cached.headers.get("X-Total-Nodes")) || 0,
+            sourceDate: decodeURIComponent(cached.headers.get("X-Source-Date") || "")
+          });
+        }
         // 确保客户端始终收到禁止本地缓存标头，避免手机客户端缓存旧备注
         const clientRes = new Response(cached.body, cached);
         clientRes.headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -138,7 +159,8 @@ export default {
         requestedInterval,
         forceRefresh,
         env,
-        ctx
+        ctx,
+        triggerSource: isClientRequest ? "订阅拉取触发" : "控制台访问触发"
       });
       let nodes = parseSubscription(data.content);
 
@@ -150,10 +172,6 @@ export default {
         const kw = filterKeyword.toLowerCase();
         nodes = nodes.filter(n => decodeURIComponent(n).toLowerCase().includes(kw));
       }
-
-      const clientUa = request.headers.get("user-agent") || "";
-      const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
-      const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
 
       // 7. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
       if (isClientRequest) {
@@ -180,16 +198,14 @@ export default {
         };
 
         const response = new Response(bodyText, { status: 200, headers });
-        if (ctx && typeof ctx.waitUntil === "function") {
-          if (cache) {
-            const edgeCacheRes = new Response(bodyText, { status: 200, headers: { ...headers, "Cache-Control": "public, max-age=60" } });
-            ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
-          }
-          const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "";
-          ctx.waitUntil(getSavedConfig(env).then(saved => sendClientFetchPush({
-            clientUa, clientIp, format: isB64 ? "Base64" : "明文", nodeCount: nodes.length, sourceDate: data.sourceDate, env, savedConfig: saved
-          })));
+        if (ctx && typeof ctx.waitUntil === "function" && cache) {
+          const edgeCacheRes = new Response(bodyText, { status: 200, headers: { ...headers, "Cache-Control": "public, max-age=60" } });
+          ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
         }
+        scheduleClientPush({
+          ctx, env, clientUa, clientIp, region, isB64,
+          sourceType: data.type, nodeCount: nodes.length, sourceDate: data.sourceDate
+        });
         return response;
       }
 

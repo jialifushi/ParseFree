@@ -170,7 +170,7 @@ npm run deploy
   - `BARK_KEY`：您的 Bark 设备 Key
   - `BARK_NOTIFY_SUCCESS`：是否开启更新成功推送（默认 `1`）
   - `BARK_NOTIFY_ALERT`：是否开启 9/12/18 点未发布告警（默认 `1`）
-  - `BARK_NOTIFY_DEVICE`：是否开启设备端拉取通知（默认 `0`，可按需开启）
+  - `BARK_NOTIFY_DEVICE`：是否开启设备端拉取通知（默认 `1`，可设为 `0` 关闭）
   - `BARK_THROTTLE_MINUTES`：设备拉取通知防刷节流分钟数（默认 `5`）
 
 ### 3. CF 边缘缓存自动清理机制

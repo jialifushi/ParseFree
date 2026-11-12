@@ -543,7 +543,7 @@ function getBarkConfig(env = {}, kvConfig = {}) {
   const titlePrefix = kvConfig.titlePrefix || env.BARK_TITLE_PREFIX || DEFAULT_TITLE_PREFIX;
   const notifySuccess = kvConfig.notifySuccess !== undefined ? Boolean(kvConfig.notifySuccess) : (env.BARK_NOTIFY_SUCCESS !== "0");
   const notifyAlert = kvConfig.notifyAlert !== undefined ? Boolean(kvConfig.notifyAlert) : (env.BARK_NOTIFY_ALERT !== "0");
-  const notifyDevice = kvConfig.notifyDevice !== undefined ? Boolean(kvConfig.notifyDevice) : (env.BARK_NOTIFY_DEVICE === "1");
+  const notifyDevice = kvConfig.notifyDevice !== undefined ? Boolean(kvConfig.notifyDevice) : (env.BARK_NOTIFY_DEVICE !== "0");
   const throttleMinutes = Number(kvConfig.throttleMinutes || env.BARK_THROTTLE_MINUTES || 5);
 
   return {
@@ -620,52 +620,72 @@ function shouldThrottleClientFetch(clientKey, throttleMinutes = 5) {
   return false;
 }
 
+function formatBjTime() {
+  return new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+}
+
+async function isClientThrottled(clientKey, throttleMinutes = 5) {
+  if (shouldThrottleClientFetch(clientKey, throttleMinutes)) return true;
+  const cache = typeof caches !== "undefined" ? caches.default : null;
+  if (!cache || throttleMinutes <= 0) return false;
+  try {
+    const req = new Request(`https://parsefree.internal/client-throttle/${encodeURIComponent(clientKey)}`);
+    if (await cache.match(req)) return true;
+    await cache.put(req, new Response("1", {
+      headers: { "Cache-Control": `public, max-age=${Math.max(60, Math.round(throttleMinutes * 60))}` }
+    }));
+  } catch (e) {}
+  return false;
+}
+
 /**
- * 发送今日更新成功通知
+ * 发送今日更新成功通知 (定时巡检/自动更新分组)
  */
-async function sendSuccessPush({ todayStr, env, savedConfig }) {
+async function sendSuccessPush({ todayStr, sourceType = "clash", triggerSource = "定时巡检", env, savedConfig }) {
   const cfg = getBarkConfig(env, savedConfig);
-  if (!cfg.enabled || !cfg.notifySuccess) return;
+  if (!cfg.enabled || !cfg.notifySuccess) return { success: false, skipped: true };
   const dayPart = todayStr.slice(-2);
   return sendBarkNotification({
     server: cfg.server,
     key: cfg.key,
-    title: `${cfg.titlePrefix} 今日节点更新成功 🚀`,
-    body: `已锁定今日（${todayStr}）节点数据。\n首节点附带日期标识【${dayPart}】\nCloudflare 边缘缓存已同步清理。`,
-    group: "ParseFree"
+    title: `${cfg.titlePrefix} [定时巡检] 今日节点已更新 🚀`,
+    body: `状态：今日新节点已发布并锁定\n数据源：${todayStr} (${String(sourceType).toUpperCase()})\n首节点标识：已附带日期【${dayPart}】\n触发方式：${triggerSource}\n检查时间：${formatBjTime()} (北京时间)\n边缘缓存：已自动清理生效`,
+    group: "ParseFree-定时巡检"
   }).catch(() => {});
 }
 
 /**
- * 发送 09:00 / 12:00 / 18:00 未发布告警通知
+ * 发送 09:00 / 12:00 / 18:00 未发布告警通知 (定时巡检分组)
  */
 async function sendAlertPush({ hour, todayStr, fallbackDate, retryMinutes = 10, env, savedConfig }) {
   const cfg = getBarkConfig(env, savedConfig);
-  if (!cfg.enabled || !cfg.notifyAlert) return;
+  if (!cfg.enabled || !cfg.notifyAlert) return { success: false, skipped: true };
   const hourStr = String(hour).padStart(2, "0");
   return sendBarkNotification({
     server: cfg.server,
     key: cfg.key,
-    title: `${cfg.titlePrefix} 今日免费节点暂未发布告警 ⚠️`,
-    body: `${hourStr}:00 检测到今日（${todayStr}）免费节点尚未发布。\n已自动回退使用【${fallbackDate || '最新有效'}】数据。\n后台重试间隔: ${retryMinutes} 分钟。`,
-    group: "ParseFree"
+    title: `${cfg.titlePrefix} [定时巡检] 今日节点暂未发布 ⚠️`,
+    body: `巡检时段：${hourStr}:00 自动检查 (北京时间)\n状态：今日（${todayStr}）免费节点尚未发布\n回退策略：已自动回退使用【${fallbackDate || "最新有效"}】数据\n重试间隔：每 ${retryMinutes} 分钟自动探测一次`,
+    group: "ParseFree-定时巡检"
   }).catch(() => {});
 }
 
 /**
- * 发送设备端拉取订阅通知 (带防刷节流)
+ * 发送设备端拉取订阅通知 (访问审计分组，带跨实例5分钟防刷节流)
  */
-async function sendClientFetchPush({ clientUa = "", clientIp = "", format = "明文", nodeCount = 0, sourceDate = "", env, savedConfig }) {
+async function sendClientFetchPush({
+  clientUa = "", clientIp = "", region = "", format = "明文", sourceType = "clash",
+  nodeCount = 0, sourceDate = "", env, savedConfig
+}) {
   const cfg = getBarkConfig(env, savedConfig);
-  if (!cfg.enabled || !cfg.notifyDevice) return;
+  if (!cfg.enabled || !cfg.notifyDevice) return { success: false, skipped: true };
 
   const throttleKey = `${clientIp}_${clientUa.slice(0, 30)}`;
-  if (shouldThrottleClientFetch(throttleKey, cfg.throttleMinutes)) {
-    return; // 节流期内不发送
+  if (await isClientThrottled(throttleKey, cfg.throttleMinutes)) {
+    return { success: false, throttled: true };
   }
 
-  // 简要识别客户端名称
-  let clientName = "未知设备";
+  let clientName = "未知设备/客户端";
   const ua = clientUa.toLowerCase();
   if (ua.includes("shadowrocket")) clientName = "Shadowrocket (小火箭)";
   else if (ua.includes("clash")) clientName = "Clash";
@@ -673,14 +693,17 @@ async function sendClientFetchPush({ clientUa = "", clientIp = "", format = "明
   else if (ua.includes("sing-box")) clientName = "sing-box";
   else if (ua.includes("quantumult")) clientName = "Quantumult X";
   else if (ua.includes("surge")) clientName = "Surge";
-  else if (ua.includes("curl") || ua.includes("wget")) clientName = "命令行 (cURL)";
+  else if (ua.includes("nekobox")) clientName = "NekoBox";
+  else if (ua.includes("surfboard")) clientName = "Surfboard";
+  else if (ua.includes("curl") || ua.includes("wget")) clientName = "命令行 (cURL/Wget)";
+  else if (ua.includes("mozilla") || ua.includes("chrome") || ua.includes("safari")) clientName = "浏览器直接拉取";
 
   return sendBarkNotification({
     server: cfg.server,
     key: cfg.key,
-    title: `${cfg.titlePrefix} 设备拉取节点通知 📱`,
-    body: `客户端：${clientName}\n格式：${format}\nIP：${clientIp || '未知'}\n下发节点数：${nodeCount} 个 (${sourceDate || '未知'})\n时间：${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
-    group: "ParseFree"
+    title: `${cfg.titlePrefix} [访问审计] ${clientName} 拉取了节点 📥`,
+    body: `事件：检测到订阅拉取请求\n客户端：${clientName}\n拉取格式：${format} (${String(sourceType).toUpperCase()})\n来源 IP：${clientIp || "未知"}${region ? ` (${region})` : ""}\n下发节点：${nodeCount} 个 (源日期 ${sourceDate || "未知"})\n拉取时间：${formatBjTime()} (北京时间)`,
+    group: "ParseFree-拉取记录"
   }).catch(() => {});
 }
 
@@ -752,7 +775,7 @@ async function getSavedConfig(env = {}) {
     barkKey: s.barkKey || env.BARK_KEY || "",
     notifySuccess: s.notifySuccess !== undefined ? Boolean(s.notifySuccess) : (env.BARK_NOTIFY_SUCCESS !== "0"),
     notifyAlert: s.notifyAlert !== undefined ? Boolean(s.notifyAlert) : (env.BARK_NOTIFY_ALERT !== "0"),
-    notifyDevice: s.notifyDevice !== undefined ? Boolean(s.notifyDevice) : (env.BARK_NOTIFY_DEVICE === "1")
+    notifyDevice: s.notifyDevice !== undefined ? Boolean(s.notifyDevice) : (env.BARK_NOTIFY_DEVICE !== "0")
   };
 }
 
@@ -783,12 +806,8 @@ async function fetchValidContent(url) {
  * 每天00点后自动递增，失败按设定间隔重试，失败期间自动回退最新可用数据，成功后立刻停止探测
  */
 async function resolveSubscriptionData({
-  requestedSource = "",
-  requestedType = "",
-  requestedInterval = null,
-  forceRefresh = false,
-  env = {},
-  ctx = null
+  requestedSource = "", requestedType = "", requestedInterval = null,
+  forceRefresh = false, env = {}, ctx = null, triggerSource = "订阅拉取触发"
 }) {
   const savedConfig = await getSavedConfig(env);
   const type = (requestedType || savedConfig.type || "clash").toLowerCase();
@@ -877,7 +896,7 @@ async function resolveSubscriptionData({
         memoryState.lastNotifiedSuccessDate = todayStr;
         const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
         if (!already) {
-          const p = sendSuccessPush({ todayStr, env, savedConfig });
+          const p = sendSuccessPush({ todayStr, sourceType: cType, triggerSource, env, savedConfig });
           if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
         }
       }
@@ -947,7 +966,7 @@ async function handleScheduledTask(env = {}, ctx = null) {
 
   let data = null;
   try {
-    data = await resolveSubscriptionData({ forceRefresh: true, env, ctx });
+    data = await resolveSubscriptionData({ forceRefresh: true, env, ctx, triggerSource: "定时巡检" });
   } catch (err) {
     console.warn(`[Cron] 探测今日源异常:`, err.message);
   }
@@ -955,7 +974,7 @@ async function handleScheduledTask(env = {}, ctx = null) {
   if (data && data.isToday) {
     const already = await isAlreadyNotified(`success-${todayStr}`, 86400);
     if (!already) {
-      const p = sendSuccessPush({ todayStr, env, savedConfig });
+      const p = sendSuccessPush({ todayStr, sourceType: data.type || savedConfig.type || "clash", triggerSource: "定时巡检", env, savedConfig });
       if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
     }
     return { success: true, isToday: true, date: todayStr, message: `今日新源已锁定 [${todayStr}]` };
@@ -1540,6 +1559,13 @@ function isProxyClient(userAgent = "") {
   return CLIENT_UA_PATTERNS.some(p => ua.includes(p));
 }
 
+function scheduleClientPush({ ctx, env, clientUa, clientIp, region, isB64, sourceType, nodeCount, sourceDate }) {
+  if (!ctx || typeof ctx.waitUntil !== "function") return;
+  ctx.waitUntil(getSavedConfig(env).then(saved => sendClientFetchPush({
+    clientUa, clientIp, region, format: isB64 ? "Base64" : "明文", sourceType, nodeCount, sourceDate, env, savedConfig: saved
+  })));
+}
+
 export default {
   // HTTP 请求处理
   async fetch(request, env, ctx) {
@@ -1628,6 +1654,12 @@ export default {
     const firstName = searchParams.get("first_name") || searchParams.get("ad_name") || env.FIRST_NODE_NAME || DEFAULT_FIRST_NODE_NAME;
     const prefix = searchParams.get("prefix") !== null ? searchParams.get("prefix") : (env.NODE_PREFIX !== undefined ? env.NODE_PREFIX : DEFAULT_NODE_PREFIX);
 
+    const clientUa = request.headers.get("user-agent") || "";
+    const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
+    const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
+    const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "";
+    const region = request.cf && request.cf.country ? `${request.cf.country}${request.cf.city ? "-" + request.cf.city : ""}` : "";
+
     // 3. 边缘缓存处理 (注入版本号与数据版本，定时任务更新或改版时旧缓存立即失效)
     const cache = typeof caches !== "undefined" ? caches.default : null;
     const cacheKeyUrl = new URL(url.toString());
@@ -1637,6 +1669,14 @@ export default {
     if (cache && !forceRefresh && request.method === "GET") {
       const cached = await cache.match(cacheKey);
       if (cached) {
+        if (isClientRequest) {
+          scheduleClientPush({
+            ctx, env, clientUa, clientIp, region, isB64,
+            sourceType: decodeURIComponent(cached.headers.get("X-Source-Type") || "clash"),
+            nodeCount: Number(cached.headers.get("X-Total-Nodes")) || 0,
+            sourceDate: decodeURIComponent(cached.headers.get("X-Source-Date") || "")
+          });
+        }
         // 确保客户端始终收到禁止本地缓存标头，避免手机客户端缓存旧备注
         const clientRes = new Response(cached.body, cached);
         clientRes.headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -1654,7 +1694,8 @@ export default {
         requestedInterval,
         forceRefresh,
         env,
-        ctx
+        ctx,
+        triggerSource: isClientRequest ? "订阅拉取触发" : "控制台访问触发"
       });
       let nodes = parseSubscription(data.content);
 
@@ -1666,10 +1707,6 @@ export default {
         const kw = filterKeyword.toLowerCase();
         nodes = nodes.filter(n => decodeURIComponent(n).toLowerCase().includes(kw));
       }
-
-      const clientUa = request.headers.get("user-agent") || "";
-      const isSubRoute = pathname === "/sub" || pathname === "/txt" || pathname.startsWith("/sub/");
-      const isClientRequest = isSubRoute || isB64 || format !== "" || isProxyClient(clientUa);
 
       // 7. 客户端请求 -> 输出纯文本节点列表或 Base64 订阅
       if (isClientRequest) {
@@ -1696,16 +1733,14 @@ export default {
         };
 
         const response = new Response(bodyText, { status: 200, headers });
-        if (ctx && typeof ctx.waitUntil === "function") {
-          if (cache) {
-            const edgeCacheRes = new Response(bodyText, { status: 200, headers: { ...headers, "Cache-Control": "public, max-age=60" } });
-            ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
-          }
-          const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip") || "";
-          ctx.waitUntil(getSavedConfig(env).then(saved => sendClientFetchPush({
-            clientUa, clientIp, format: isB64 ? "Base64" : "明文", nodeCount: nodes.length, sourceDate: data.sourceDate, env, savedConfig: saved
-          })));
+        if (ctx && typeof ctx.waitUntil === "function" && cache) {
+          const edgeCacheRes = new Response(bodyText, { status: 200, headers: { ...headers, "Cache-Control": "public, max-age=60" } });
+          ctx.waitUntil(cache.put(cacheKey, edgeCacheRes));
         }
+        scheduleClientPush({
+          ctx, env, clientUa, clientIp, region, isB64,
+          sourceType: data.type, nodeCount: nodes.length, sourceDate: data.sourceDate
+        });
         return response;
       }
 
